@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { record, string } from "./surface";
+import type { RpcRecord } from "./rpc";
 
 export function sessionActivity(type: unknown): boolean | undefined {
   switch (type) {
@@ -22,6 +23,10 @@ export async function resumeFields(args: readonly string[], cwd: string) {
   let header;
   try { header = record(JSON.parse(line)); }
   catch (e) { if (!(e instanceof SyntaxError)) throw e; throw new Error("Invalid saved session header"); }
+  return resumeHeaderFields(path, cwd, header);
+}
+
+export async function resumeHeaderFields(path: string, cwd: string, header: RpcRecord) {
   const saved = string(header.cwd);
   if (header.type !== "session" || !isAbsolute(saved)) throw new Error("Saved session has no absolute working directory");
   if (await realpath(saved) !== await realpath(cwd))

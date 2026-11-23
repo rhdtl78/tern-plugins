@@ -30,11 +30,28 @@ Open the command palette, search for `OMO`, and select **OMO: New Session**. The
 - Click **Stop** to cancel a running turn and return to the composer. Escape didn't stop the turn reliably in Tern 0.9.31. Use the button.
 - Press **Ctrl+D** to close the OmO session gracefully and restore the terminal's input settings.
 
-Confirmation requests require an explicit choice. Enter doesn't approve them. The footer shows the model reported by OmO. There is no model picker.
+Confirmation requests require an explicit choice. Enter doesn't approve them.
+
+### Choose a model
+
+When the session is idle, click the model name in the footer. Type part of a model name, provider, or model ID to filter the list. Use **↑** and **↓** to select a row. Press **Enter** or click **Use model** to apply it. You can also click a row to select it, then click the selected row to apply it.
+
+**Escape** or **Cancel** dismisses the picker without changing the model. Neither selecting a model nor cancelling sends your draft. The footer updates after OmO confirms the switch. The switch affects this session, not the device default. An engine without the `session_model_scope` capability shows an error instead.
 
 ## Reopen a saved session
 
-There is no resume picker or Resume palette command. In a local Tern terminal pane, change to the working directory recorded in the saved session's JSONL header, then run:
+From a terminal or agent pane in the original project, choose **OMO: Resume Session** in the palette. It opens the picker in a separate tab. No OmO session starts while you browse. The picker lists saved local sessions whose recorded working directory resolves to this project, newest first. Worker sessions and files without any saved entries are excluded.
+
+Type to filter by title, filename, or displayed date. Use the same row controls as the model picker, then press **Enter** or click **Resume**. The plugin rechecks the file and working directory before opening the transcript. If the file is gone, click **Reload** to refresh the list. **Escape** or **Cancel** exits this launcher without opening a session.
+
+You can also launch the picker directly from a local Tern terminal:
+
+```sh
+cd "/absolute/path/to/saved-working-directory" &&
+  bun run "/absolute/path/to/tern-plugins/plugins/omo-native/main.ts" --resume
+```
+
+To bypass the picker, pass an absolute path:
 
 ```sh
 cd "/absolute/path/to/saved-working-directory" &&
@@ -46,6 +63,9 @@ Replace both file paths with the actual paths to the plugin entry and the saved 
 
 ## Verification
 
-The recorded checks used the real Tern 0.9.31 renderer, `omo` 5.1.81, and Bun 1.4.2. The conversation checks ran in an isolated profile against a deterministic synthetic model on localhost. The tool check only read a scratch fixture file.
+Run `bun test ./plugins/omo-native` from the repository root. To exercise the native pickers in an isolated Tern profile:
 
-The checks covered the palette launch, multiline input, streaming replies, tool disclosure, **Stop**, and reopening a saved transcript. The package's Bun suite recorded 10 passing tests and no failures. These checks did not cover external provider authentication.
+1. Open **OMO: New Session**, type a draft, then click `[data-id="model"]`. In `.sf-picker[data-role="omo.models"]`, type a query and inspect `.pk-search .q` and `.pk-row.sel`. Cancel and check that `[data-id="draft"]` still contains the unsent text.
+2. Reopen the picker and select another provider/model pair. Click `[data-pk="act"][data-v="use"]`. Check that the footer changes without a new transcript entry. Send the draft explicitly and check the selected model in the isolated engine log.
+3. In a project with saved history, open **OMO: Resume Session**. In `.sf-picker[data-role="omo.sessions"]`, confirm that another project's sessions are absent. Filter, select a `[role="option"]`, and press **Enter**. Check for a message unique to that saved transcript and verify that the original tab is unchanged.
+4. Open **Resume Session** in an empty project and cancel. Check that the engine received no `open_session` request from that tab. To check stale files, remove a disposable saved fixture after the picker lists it and before activating its row. Check for an error rather than a fresh chat.
