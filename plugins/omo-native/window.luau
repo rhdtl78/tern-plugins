@@ -1,9 +1,10 @@
 --!strict
 
-local entry = tern.plugin.dir .. "/main.ts"
--- Launch.command takes a shell line, not argv. Pass the entry as one literal argument.
-local command = [=[/bin/sh -c 'if command -v bun >/dev/null 2>&1; then exec bun "$@"; fi; exec "$HOME/.bun/bin/bun" "$@"' omo-native run ]=]
-    .. "'" .. entry:gsub("'", "'\"'\"'") .. "'"
+-- Quote the directory, but keep the executable basename visible to Tern.
+local command = "'" .. tern.plugin.dir:gsub("'", "'\"'\"'") .. "'/omo-native"
+
+-- Tern groups OMO under "agent"; register by executable to leave other agents alone.
+tern.chrome.program_icon("omo-native", "puzzle")
 
 local function launch(id: string, title: string, args: string)
     tern.command({ id = id, title = title, run = function(cx)

@@ -1,0 +1,11 @@
+/* Replace the icon registered for the OMO Native launcher. */
+:is(.tn-face, .tn-dk-c)[data-program="agent"][data-icon="puzzle"] {
+    background-image: url(omo-icon.svg);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+}
+
+:is(.tn-face, .tn-dk-c)[data-program="agent"][data-icon="puzzle"] > svg {
+    visibility: hidden;
+}

@@ -4,3 +4,4 @@ name = "OMO Native"
 version = "0.1.0"
 description = "Launch OMO sessions as native inline surfaces in Tern."
 window = "window.luau"
+styles = ["chrome.css"]
