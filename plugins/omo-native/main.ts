@@ -1,0 +1,220 @@
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { OmoRpc, RpcCommandError, type RpcRecord } from "./rpc";
+import { add, InputStream, node, plain, record, string, Surface, surface, type Input, type Op } from "./surface";
+import { Editor } from "./editor";
+import { Transcript } from "./transcript";
+import { dialog } from "./dialog";
+import { resumeFields, sessionActivity } from "./session";
+
+const screen = new Surface(), editor = new Editor(), input = new InputStream();
+const frame = (...ops: Op[]) => screen.frame(...ops);
+const transcript = new Transcript(frame);
+const cwd = process.cwd();
+let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
+let live = false, ready = false, closing = false, busy = false, welcome = true;
+let status = "Opening session…", seq = 0, answering = false, savedDraft = "";
+let ask: ReturnType<typeof dialog> | undefined;
+const waiting = new Map<string, RpcRecord>();
+let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
+const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+
+function refresh() {
+  const canSend = ready && !busy && !ask;
+  frame(["set", "draft", { text: editor.text, cursor: editor.cursor, readonly: !ready || (!!ask && !ask.typed),
+    placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend }],
+    ["set", "send", { hidden: !canSend && !ask?.typed }],
+    ["set", "stop", { hidden: !busy || !!ask }],
+    ["set", "notice", { text: status, hidden: !status }]);
+  if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
+}
+function notice(text: string) { status = text; refresh(); }
+function fail(e: unknown) {
+  ready = false; busy = false;
+  notice(`OMO unavailable: ${why(e)}. Close this pane or press Ctrl+D.`);
+}
+async function close() {
+  if (closing) return;
+  closing = true; clearTimeout(timer); clearTimeout(esc); unsubscribe?.();
+  try { await rpc?.close(); }
+  finally {
+    if (live) screen.send("x", { id: surface, keep: true });
+    process.stdout.write("\x1b[<u\x1b[?2004l");
+    await Bun.sleep(60);
+    process.stdin.setRawMode(false); process.stdin.pause();
+    process.exit(process.exitCode ?? 0);
+  }
+}
+function nextDialog() {
+  if (ask || !rpc) return;
+  const first = waiting.entries().next().value;
+  if (!first) return;
+  const [id, req] = first;
+  waiting.delete(id);
+  ask = dialog(req, ++seq);
+  savedDraft = editor.text; editor.reset("");
+  if (!ask.supported) {
+    notice(`Cannot display ${plain(string(req.method))} in this surface; cancelling.`);
+    void answer({ cancelled: true }); return;
+  }
+  frame(add("dialogs", ask.view)); refresh();
+}
+function dismiss(id: string) {
+  waiting.delete(id);
+  if (ask?.requestId !== id) return;
+  if (ask.supported) frame(["del", ask.id]);
+  ask = undefined; answering = false;
+  editor.reset(savedDraft); nextDialog(); refresh();
+}
+async function answer(fields: RpcRecord) {
+  if (!ask || answering || !rpc) return;
+  const current = ask; answering = true;
+  try {
+    await rpc.respondToUi(current.requestId, { ...fields, answerId: crypto.randomUUID() });
+    dismiss(current.requestId);
+  } catch (e) {
+    if (ask === current) answering = false;
+    if (e instanceof RpcCommandError && /already_resolved|unknown_extension_ui_request/.test(e.message)) dismiss(current.requestId);
+    notice(`Answer not accepted: ${why(e)}`);
+  }
+}
+function onRpc(e: RpcRecord) {
+  if (closing) return;
+  const active = sessionActivity(e.type);
+  if (active !== undefined) {
+    if (active !== busy || active) { busy = active; notice(active ? "Working…" : ""); }
+    return;
+  }
+  switch (e.type) {
+    case "question_resolved": dismiss(string(e.id)); return;
+    case "extension_ui_request": {
+      if (e.method === "notify") { notice(plain(string(e.message))); return; }
+      if (["setTitle","setStatus","setSubagentCost","setWidget","set_editor_text"].includes(string(e.method))) return;
+      const id = string(e.id);
+      if (id && ask?.requestId !== id) waiting.set(id, e);
+      nextDialog(); return;
+    }
+    default: transcript.event(e);
+  }
+  if (welcome && transcript.populated) refresh();
+}
+async function start(hello: RpcRecord) {
+  clearTimeout(timer); live = true; screen.negotiate(hello);
+  // omp.session is Tern's built-in chat stylesheet, not the program's identity.
+  screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
+  frame(add(surface, node("main", "col", {}, [
+    node("welcome", "card", { role: "omp.welcome" }, [
+      node("wordmark", "text", { role: "omp.welcome.wordmark", spans: [{ t: "OMO", s: "strong" }] }),
+      node("hint", "text", { role: "omp.welcome.tip-text", text: "Enter to send · Shift+Enter for a new line" }),
+    ]),
+  ])), add(surface, node("dock", "col", {}, [
+    node("dialogs", "col"), node("notice", "text", { text: status }),
+    node("composer", "col", { role: "omp.editor" }, [
+      node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
+        node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
+      ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
+        node("model", "text", { text: "OMO", wrap: "none" }), node("gap", "row", { grow: 1 }),
+        node("stop", "button", { text: "Stop", actions: { click: "stop" }, hidden: true }),
+        node("send", "kbd", { keys: ["enter"], role: "omp.composer.send", title: "Send message", actions: { click: "submit" }, hidden: true }),
+      ]),
+    ]),
+  ])), ["focus", "draft"]);
+  try {
+    const fields = await resumeFields(process.argv.slice(2), cwd);
+    const command = Bun.which("omo") ?? Bun.which(join(dirname(process.execPath), "omo")) ?? Bun.which(join(homedir(), ".bun/bin/omo"));
+    if (!command) throw new Error("Could not find the omo executable");
+    const client = rpc = new OmoRpc({ cwd, argv: [command, "--mode", "rpc", "--listen", "stdio://"],
+      env: { PATH: [process.env.PATH, dirname(process.execPath)].filter(Boolean).join(":") },
+      capabilities: ["interactive_user","question"] });
+    const pending: RpcRecord[] = [];
+    unsubscribe = client.onEvent(e => ready ? onRpc(e) : pending.push(e));
+    const { state } = await client.openSession({ auto_title: false, ...fields });
+    for (const message of await client.getMessages()) transcript.message(message);
+    busy = state.isStreaming === true; ready = true; status = busy ? "Working…" : "";
+    const model = record(state.model);
+    frame(["set", "model", { text: plain(string(model.name) || string(model.id) || string(state.model) || "No model selected") }]);
+    refresh();
+    if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
+    pending.forEach(onRpc);
+    void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
+  } catch (e) { if (!closing) fail(e); await rpc?.close(); }
+}
+async function submit(text: string) {
+  if (ask) { if (ask.typed && text.trim()) await answer(ask.typed(text)); return; }
+  if (!ready || !rpc || busy || !text.trim()) return;
+  busy = true; editor.reset(""); notice("Working…");
+  try {
+    const reply = await rpc.prompt(text);
+    // A slash command may finish inside an extension without any agent_idle.
+    if (record(reply.data).disposition === "handled") {
+      busy = false;
+      if (status === "Working…") status = "";
+      refresh();
+    }
+  }
+  catch (e) {
+    busy = false;
+    if (!editor.text) editor.reset(text);
+    notice(`Prompt not sent or not acknowledged: ${why(e)}`);
+  }
+}
+async function stop() {
+  if (ask) return answer({ cancelled: true });
+  if (!rpc || !busy) return;
+  notice("Stopping…");
+  try { await rpc.abort({ awaitIdle: true }); busy = false; notice("Stopped"); }
+  catch (e) { notice(`Stop failed: ${why(e)}`); }
+}
+function handle(i: Input) {
+  if (closing) return;
+  if (i.kind === "event") {
+    const e = i.value;
+    if (!live && e.r === "hello" && e.v === 1) { void start(e); return; }
+    if (!live || e.sf !== surface) return;
+    switch (e.ev) {
+      case "ack": screen.ack(e.s); return;
+      case "gone": if (Array.isArray(e.ids) && e.ids.includes(surface)) void close(); return;
+      case "error": fail(`Tern: ${string(e.msg)}`); return;
+      case "toggle": transcript.fold(string(e.id), e.collapsed === true); return;
+      case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
+      case "send": if (e.id === "draft" && !ask) void submit(string(e.text)); return;
+      case "action":
+        if (e.id === "stop" && e.act === "stop") void stop();
+        if (e.id === "send" && e.act === "submit") void submit(editor.text);
+        if (ask && e.act === "choose") {
+          const choice = ask.choices.find((_, n) => e.id === `${ask?.id}.${n}`);
+          if (choice) void answer(choice.fields);
+        }
+        return;
+    }
+  }
+  if (i.kind === "key" && i.value === "\x04") { void close(); return; }
+  if (!live || !ready || (ask && !ask.typed && i.kind !== "key")) return;
+  if (ask && !ask.typed) {
+    if (i.value === "\x1b" || i.value === "\x03") void stop();
+    return;
+  }
+  switch (editor.apply(i)) {
+    case "edit": refresh(); break;
+    case "submit": void submit(editor.text); break;
+    case "stop": void stop(); break;
+    case "fold": transcript.flipTools(); break;
+    case "exit": void close(); break;
+  }
+}
+if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  console.error("OMO Native needs a Tern pane with native program surfaces enabled."); process.exitCode = 1;
+} else {
+  process.stdin.setRawMode(true).setEncoding("utf8").on("data", (chunk: string) => {
+    clearTimeout(esc); input.feed(chunk).forEach(handle);
+    if (chunk.endsWith("\x1b")) esc = setTimeout(() => input.feed("", true).forEach(handle), 40);
+  }).once("end", close).resume();
+  for (const signal of ["SIGINT","SIGHUP","SIGTERM"] as const) process.once(signal, close);
+  process.stdout.on("error", close);
+  screen.send("q", { q: "hello", app: "omo", v: [1], features: ["edit","send"] });
+  process.stdout.write("\x1b[c\x1b[?2004h\x1b[>1u");
+  timer = setTimeout(() => {
+    process.stderr.write("OMO Native: Tern did not negotiate a surface. Enable Native program surfaces and reopen this pane.\r\n");
+    process.exitCode = 1; void close();
+  }, 1500);
+}
