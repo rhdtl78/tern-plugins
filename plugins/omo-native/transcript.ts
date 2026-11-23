@@ -7,12 +7,45 @@ function body(content: unknown): string {
     b.type === "text" ? [plain(string(b.text))] : b.type === "image" ? ["[Image]"] : []).join("\n\n") : "";
 }
 
+type ChecklistItem = {
+  readonly id: string;
+  readonly text: string;
+  readonly status: "pending" | "active" | "done";
+};
+type ChecklistPhase = {
+  readonly id: string;
+  readonly title: string;
+  readonly items: readonly ChecklistItem[];
+};
+
+function todoPhases(details: unknown): readonly ChecklistPhase[] | undefined {
+  const { phases } = record(details);
+  if (!Array.isArray(phases) || !phases.length) return;
+  const checklist: ChecklistPhase[] = [];
+  for (const phase of phases) {
+    const { name, tasks } = record(phase);
+    const title = plain(string(name));
+    if (!title.trim() || !Array.isArray(tasks) || !tasks.length) return;
+    const items: ChecklistItem[] = [];
+    for (const task of tasks) {
+      const { content, status } = record(task);
+      const text = plain(string(content));
+      const state = status === "in_progress" ? "active" : status === "completed" ? "done"
+        : status === "pending" ? "pending" : undefined;
+      if (!text.trim() || !state) return;
+      items.push({ id: `${checklist.length}:${items.length}`, text, status: state });
+    }
+    checklist.push({ id: String(checklist.length), title, items });
+  }
+  return checklist;
+}
+
 /** History and live tool events share one identity per call, including its disclosure. */
 export class Transcript {
   #seq = 0;
   #assistant = "";
   #blocks = new Map<number, string>();
-  #tools = new Map<string, string>();
+  #tools = new Map<string, { readonly id: string; readonly name: string; checklist: boolean }>();
   #folds = new Map<string, boolean>();
   constructor(private readonly frame: (...ops: Op[]) => void) {}
   get populated() { return this.#seq !== 0; }
@@ -25,21 +58,33 @@ export class Transcript {
       this.frame(["set", id, { collapsed: collapse }]);
     }
   }
-  #tool(call: string, name: string, args: RpcRecord, status: string, output?: string) {
+  #tool(call: string, name: string, args: RpcRecord, status: string, result?: RpcRecord) {
     if (!call) return;
-    let id = this.#tools.get(call);
-    if (!id) {
-      id = `t${++this.#seq}`;
-      this.#tools.set(call, id);
+    const tool = this.#tools.get(call);
+    const id = tool?.id ?? `t${++this.#seq}`;
+    const phases = (name || tool?.name) === "todo" && status === "done" ? todoPhases(result?.details) : undefined;
+    const output = phases
+      ? node(id + ".todo", "checklist", { mode: "full", phases })
+      : node(id + ".out", "code", { lang: "text", text: body(result?.content) });
+    if (!tool) {
+      this.#tools.set(call, { id, name, checklist: !!phases });
       this.#folds.set(id, true);
       const target = plain(string(args.path) || string(args.command) || string(args.query));
       this.frame(add("main", node(id, "tool", {
         name: plain(name), title: plain(name) || "Tool", target, targetKind: args.path ? "path" : args.command ? "command" : "text",
         collapsible: true, collapsed: true, status,
-      }, [node(id + ".out", "code", { lang: "text", text: output ?? "" })])));
+      }, [output])));
     } else {
       this.frame(["set", id, { status }]);
-      if (output !== undefined) this.frame(["text", id + ".out", "replace", output]);
+      if (!result) return;
+      if (tool.checklist !== !!phases) {
+        this.frame(["del", id + (tool.checklist ? ".todo" : ".out")], add(id, output));
+        tool.checklist = !!phases;
+      } else if (phases) {
+        this.frame(["set", output.id, { phases }]);
+      } else {
+        this.frame(["text", output.id, "replace", output.p.text]);
+      }
     }
   }
   #text(text: string, assistant: boolean) {
@@ -64,7 +109,7 @@ export class Transcript {
         this.#assistant = ""; this.#blocks.clear(); break;
       }
       case "toolResult":
-        this.#tool(string(m.toolCallId), string(m.toolName), {}, m.isError ? "error" : "done", body(m.content)); break;
+        this.#tool(string(m.toolCallId), string(m.toolName), {}, m.isError ? "error" : "done", m); break;
     }
   }
   event(e: RpcRecord) {
@@ -86,7 +131,7 @@ export class Transcript {
         const result = e.partialResult ?? e.result;
         this.#tool(string(e.toolCallId), string(e.toolName), record(e.args),
           e.type === "tool_execution_end" ? (e.isError ? "error" : "done") : "running",
-          result ? body(record(result).content) : undefined);
+          result ? record(result) : undefined);
         break;
       }
     }
