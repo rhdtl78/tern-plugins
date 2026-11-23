@@ -1,71 +1,33 @@
-# OMO Native for Tern
+![](docs/assets/tern-plugins-banner.svg)
 
-OMO Native opens a local OmO session as a native chat tab in Tern. It streams replies, renders assistant Markdown, and shows tool activity in expandable cards. The tab runs its own `omo` process over standard input and output rather than embedding the OmO terminal UI.
+# tern-plugins
 
-## Setup
+**Bring more of your workflow into Tern.**
 
-Use a local Tern session with **Native program surfaces** enabled. Install Bun and the `omo` executable. The launcher looks for Bun on `PATH` and falls back to `~/.bun/bin/bun`. The plugin looks for `omo` on `PATH`, next to the running Bun executable, then at `~/.bun/bin/omo`.
+A personal collection of plugins for the Tern terminal, maintained by [@rhdtl78](https://github.com/rhdtl78). It's independent and isn't an official Tern catalog.
 
-From the repository root, link and check the plugin:
+[Browse plugins](#plugins) · [Quick start](#quick-start)
+
+## Plugins
+
+- **[OMO Native](plugins/omo-native/README.md)** — Native OmO chat in Tern with streamed replies, expandable tool activity, and saved-session resume.
+
+## Quick start
+
+To try OMO Native, use a local Tern session with **Native program surfaces** enabled. Install Bun and the `omo` executable, then run these commands from the root of your local checkout:
 
 ```sh
 tern plugin link "$PWD/plugins/omo-native"
 tern plugin list
 ```
 
-Look for `omo-native` in the list. Tern links the package where it is, so keep that directory in place while the link is active. The existing `omo` plugin has a separate ID. Leave its link in place.
+Look for `omo-native` in the list. Keep the plugin directory in place while it's linked. Open Tern's command palette and choose **OMO: New Session**.
 
-To unlink only OMO Native:
+See the [OMO Native guide](plugins/omo-native/README.md) for setup details, session controls, and how to unlink the plugin.
 
-```sh
-tern plugin unlink omo-native
-```
+## Resources
 
-## Start and control a session
+- [Tern Plugin SDK](https://docs.stencil.so/tern/) for writing your own plugin.
+- [GitHub Issues](https://github.com/rhdtl78/tern-plugins/issues) for bug reports.
 
-Open the command palette, search for `OMO`, and select **OMO: New Session**. The command opens a fresh chat in a new tab. It uses the focused terminal or agent pane's working directory when available. Otherwise, Tern uses its normal new-tab directory.
-
-- **Enter** sends the draft. **Shift+Enter** inserts a newline. Pasting text doesn't send it.
-- Click a tool card's header to expand or collapse it. **Ctrl+O** toggles the tool cards as a group.
-- Click **Stop** to cancel a running turn and return to the composer. Escape didn't stop the turn reliably in Tern 0.9.31. Use the button.
-- Press **Ctrl+D** to close the OmO session gracefully and restore the terminal's input settings.
-
-Confirmation requests require an explicit choice. Enter doesn't approve them.
-
-### Choose a model
-
-When the session is idle, click the model name in the footer. Type part of a model name, provider, or model ID to filter the list. Use **↑** and **↓** to select a row. Press **Enter** or click **Use model** to apply it. You can also click a row to select it, then click the selected row to apply it.
-
-**Escape** or **Cancel** dismisses the picker without changing the model. Neither selecting a model nor cancelling sends your draft. The footer updates after OmO confirms the switch. The switch affects this session, not the device default. An engine without the `session_model_scope` capability shows an error instead.
-
-## Reopen a saved session
-
-From a terminal or agent pane in the original project, choose **OMO: Resume Session** in the palette. It opens the picker in a separate tab. No OmO session starts while you browse. The picker lists saved local sessions whose recorded working directory resolves to this project, newest first. Worker sessions and files without any saved entries are excluded.
-
-Type to filter by title, filename, or displayed date. Use the same row controls as the model picker, then press **Enter** or click **Resume**. The plugin rechecks the file and working directory before opening the transcript. If the file is gone, click **Reload** to refresh the list. **Escape** or **Cancel** exits this launcher without opening a session.
-
-You can also launch the picker directly from a local Tern terminal:
-
-```sh
-cd "/absolute/path/to/saved-working-directory" &&
-  bun run "/absolute/path/to/tern-plugins/plugins/omo-native/main.ts" --resume
-```
-
-To bypass the picker, pass an absolute path:
-
-```sh
-cd "/absolute/path/to/saved-working-directory" &&
-  bun run "/absolute/path/to/tern-plugins/plugins/omo-native/main.ts" \
-    --session "/absolute/path/to/session.jsonl"
-```
-
-Replace both file paths with the actual paths to the plugin entry and the saved JSONL file. The plugin rejects a relative session path or a working directory that doesn't match the saved one. A successful reopen shows the saved transcript before you send another message.
-
-## Verification
-
-Run `bun test ./plugins/omo-native` from the repository root. To exercise the native pickers in an isolated Tern profile:
-
-1. Open **OMO: New Session**, type a draft, then click `[data-id="model"]`. In `.sf-picker[data-role="omo.models"]`, type a query and inspect `.pk-search .q` and `.pk-row.sel`. Cancel and check that `[data-id="draft"]` still contains the unsent text.
-2. Reopen the picker and select another provider/model pair. Click `[data-pk="act"][data-v="use"]`. Check that the footer changes without a new transcript entry. Send the draft explicitly and check the selected model in the isolated engine log.
-3. In a project with saved history, open **OMO: Resume Session**. In `.sf-picker[data-role="omo.sessions"]`, confirm that another project's sessions are absent. Filter, select a `[role="option"]`, and press **Enter**. Check for a message unique to that saved transcript and verify that the original tab is unchanged.
-4. Open **Resume Session** in an empty project and cancel. Check that the engine received no `open_session` request from that tab. To check stale files, remove a disposable saved fixture after the picker lists it and before activating its row. Check for an error rather than a fresh chat.
+If you find the collection useful, [star it on GitHub](https://github.com/rhdtl78/tern-plugins). Have an idea for another plugin? [Suggest it in Issues](https://github.com/rhdtl78/tern-plugins/issues/new).
