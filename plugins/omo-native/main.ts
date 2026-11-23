@@ -15,7 +15,8 @@ const transcript = new Transcript(frame);
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
 let live = false, ready = false, closing = false, busy = false, welcome = true;
-let status = "Opening session…", seq = 0, answering = false, savedDraft = "";
+let status: "" | "Opening session…" | "Working…" | "Stopping…" = "Opening session…";
+let seq = 0, answering = false, savedDraft = "", failureShown = false;
 let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
 let toastId: string | undefined;
@@ -30,10 +31,10 @@ function refresh() {
     placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
     ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker }],
-    ["set", "notice", { text: status, hidden: !status }]);
+    ["set", "session-status", { text: status, hidden: !status }]);
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
-function notice(text: string) { status = text; refresh(); }
+function showStatus(text: typeof status) { status = text; refresh(); }
 function notify(text: string, tone: "info" | "error" = "info") {
   const message = plain(text).trim();
   if (!message) return;
@@ -46,7 +47,16 @@ function notify(text: string, tone: "info" | "error" = "info") {
 function fail(e: unknown) {
   ready = false; busy = false;
   removePicker();
-  notice(`OMO unavailable: ${why(e)}. Close this pane or press Ctrl+D.`);
+  if (welcome) { welcome = false; frame(["del", "welcome"]); }
+  const text = `${why(e)}. Close this pane or press Ctrl+D.`;
+  if (failureShown) frame(["set", "failure-detail", { text }]);
+  else {
+    failureShown = true;
+    frame(add("main", node("session-error", "card", { head: "OMO unavailable", tone: "error" }, [
+      node("failure-detail", "text", { text }),
+    ])));
+  }
+  showStatus("");
 }
 async function close() {
   if (closing) return;
@@ -99,7 +109,7 @@ function onRpc(e: RpcRecord) {
   const active = sessionActivity(e.type);
   if (active !== undefined) {
     if (active) removePicker();
-    if (active !== busy || active) { busy = active; notice(active ? "Working…" : ""); }
+    if (active !== busy || active) { busy = active; showStatus(active ? "Working…" : ""); }
     return;
   }
   switch (e.type) {
@@ -128,13 +138,14 @@ async function start(hello: RpcRecord) {
       node("hint", "text", { role: "omp.welcome.tip-text", text: "Enter to send · Shift+Enter for a new line" }),
     ]),
   ])), add(surface, node("dock", "col", {}, [
-    node("dialogs", "col"), node("notice", "text", { text: status }),
+    node("dialogs", "col"),
     node("composer", "col", { role: "omp.editor" }, [
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
       ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
         node("model", "button", { text: "OMO", variant: "quiet", title: "Choose model", disabled: true,
           actions: { click: "models" } }), node("gap", "row", { grow: 1 }),
+        node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
         node("stop", "button", { text: "Stop", actions: { click: "stop" }, hidden: true }),
         node("send", "kbd", { keys: ["enter"], role: "omp.composer.send", title: "Send message", actions: { click: "submit" }, hidden: true }),
       ]),
@@ -203,7 +214,7 @@ async function choose(p: Picker) {
     if ("path" in target) {
       const { fields, verify } = await selectedSession(target, cwd);
       if (closing || picker !== p) return;
-      removePicker(); notice("Opening session…");
+      removePicker(); showStatus("Opening session…");
       try { await openSession(fields, verify); }
       catch (e) { if (!closing) fail(e); await rpc?.close(); }
       return;
@@ -233,7 +244,7 @@ function pickerInput(p: Picker, i: Input) {
 async function submit(text: string) {
   if (ask) { if (ask.typed && text.trim()) await answer(ask.typed(text)); return; }
   if (!ready || !rpc || busy || !text.trim()) return;
-  busy = true; editor.reset(""); notice("Working…");
+  busy = true; editor.reset(""); showStatus("Working…");
   try {
     const reply = await rpc.prompt(text);
     // A slash command may finish inside an extension without any agent_idle.
@@ -246,16 +257,16 @@ async function submit(text: string) {
   catch (e) {
     busy = false;
     if (!editor.text) editor.reset(text);
-    notice("");
+    showStatus("");
     notify(`Prompt not sent or not acknowledged: ${why(e)}`, "error");
   }
 }
 async function stop() {
   if (ask) return answer({ cancelled: true });
   if (!rpc || !busy) return;
-  notice("Stopping…");
-  try { await rpc.abort({ awaitIdle: true }); busy = false; notice(""); notify("Stopped"); }
-  catch (e) { notice(busy ? "Working…" : ""); notify(`Stop failed: ${why(e)}`, "error"); }
+  showStatus("Stopping…");
+  try { await rpc.abort({ awaitIdle: true }); busy = false; showStatus(""); notify("Stopped"); }
+  catch (e) { showStatus(busy ? "Working…" : ""); notify(`Stop failed: ${why(e)}`, "error"); }
 }
 function handle(i: Input) {
   if (closing) return;
