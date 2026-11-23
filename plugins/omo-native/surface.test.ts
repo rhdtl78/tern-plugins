@@ -77,6 +77,57 @@ test("restored calls and result events share a disclosure and keep output litera
   expect(ops.at(-1)).toEqual(["set", ops[1]?.[1], { collapsed: false }]);
 });
 
+const todoDetails = {
+  phases: [
+    { name: "Validation", tasks: [
+      { content: "Check input", status: "completed" },
+      { content: "Review output", status: "in_progress" },
+    ] },
+    { name: "Release", tasks: [{ content: "Publish report", status: "pending" }] },
+  ],
+};
+
+test.each(["live", "restored"] as const)("%s Todo displays all phases and statuses inside the original tool card", (source) => {
+  const ops: Op[] = [];
+  const t = new Transcript((...o) => ops.push(...o));
+  t.message({ role: "assistant", content: [{ type: "toolCall", id: "call", name: "todo" }] });
+  t.fold("t1", false);
+  const result = { content: [{ type: "text", text: "Raw status" }], details: todoDetails };
+  if (source === "live") t.event({ type: "tool_execution_end", toolCallId: "call", toolName: "todo", result });
+  else t.message({ role: "toolResult", toolCallId: "call", toolName: "todo", ...result });
+
+  expect(ops.filter(o => o[2] === "main")).toHaveLength(1);
+  expect(ops).toContainEqual(["del", "t1.out"]);
+  expect(ops.find(o => o[0] === "add" && o[2] === "t1")?.[4]).toMatchObject({
+    k: "checklist", p: { mode: "full", phases: [
+      { title: "Validation", items: [
+        { text: "Check input", status: "done" },
+        { text: "Review output", status: "active" },
+      ] },
+      { title: "Release", items: [{ text: "Publish report", status: "pending" }] },
+    ] },
+  });
+  t.flipTools();
+  expect(ops.at(-1)).toEqual(["set", "t1", { collapsed: true }]);
+});
+
+test.each([
+  ["legacy", "todo", false, undefined],
+  ["malformed", "todo", false, { phases: [...todoDetails.phases, { name: "Broken", tasks: [{}] }] }],
+  ["unknown status", "todo", false, { phases: [{ name: "Check", tasks: [{ content: "Task", status: "active" }] }] }],
+  ["failed", "todo", true, todoDetails],
+  ["different tool", "read", false, todoDetails],
+] as const)("%s result retains the literal code body", (_label, toolName, isError, details) => {
+  const ops: Op[] = [];
+  const t = new Transcript((...o) => ops.push(...o));
+  t.message({ role: "toolResult", toolCallId: "call", toolName, isError, details,
+    content: [{ type: "text", text: "**Raw status**" }] });
+  expect(ops[0]?.[4]).toMatchObject({
+    k: "tool", p: { status: isError ? "error" : "done" },
+    c: [{ k: "code", p: { text: "**Raw status**" } }],
+  });
+});
+
 test("permission and question answers bind to the displayed option, never to plain Enter", () => {
   const d = dialog({ method: "select", title: "Permission required", id: "permission", options: ["Allow once","Deny"] }, 1);
   expect(d.typed).toBeUndefined();
