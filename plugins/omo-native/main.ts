@@ -18,6 +18,7 @@ let live = false, ready = false, closing = false, busy = false, welcome = true;
 let status = "Opening session…", seq = 0, answering = false, savedDraft = "";
 let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
+let toastId: string | undefined;
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
 const waiting = new Map<string, RpcRecord>();
 let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
@@ -33,6 +34,15 @@ function refresh() {
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
 function notice(text: string) { status = text; refresh(); }
+function notify(text: string, tone: "info" | "error" = "info") {
+  const message = plain(text).trim();
+  if (!message) return;
+  const nextId = `toast${++seq}`;
+  // A fresh node replays identical messages; keep only the latest in the surface.
+  frame(...(toastId ? [["del", toastId]] : []),
+    add("layer", node(nextId, "toast", { text: message, tone })));
+  toastId = nextId;
+}
 function fail(e: unknown) {
   ready = false; busy = false;
   removePicker();
@@ -60,7 +70,7 @@ function nextDialog() {
   ask = dialog(req, ++seq);
   savedDraft = editor.text; editor.reset("");
   if (!ask.supported) {
-    notice(`Cannot display ${plain(string(req.method))} in this surface; cancelling.`);
+    notify(`Cannot display ${string(req.method)} in this surface; cancelling.`, "error");
     void answer({ cancelled: true }); return;
   }
   frame(add("dialogs", ask.view), ["focus", ask.typed ? "draft" : null]); refresh();
@@ -81,7 +91,7 @@ async function answer(fields: RpcRecord) {
   } catch (e) {
     if (ask === current) answering = false;
     if (e instanceof RpcCommandError && /already_resolved|unknown_extension_ui_request/.test(e.message)) dismiss(current.requestId);
-    notice(`Answer not accepted: ${why(e)}`);
+    notify(`Answer not accepted: ${why(e)}`, "error");
   }
 }
 function onRpc(e: RpcRecord) {
@@ -95,7 +105,10 @@ function onRpc(e: RpcRecord) {
   switch (e.type) {
     case "question_resolved": dismiss(string(e.id)); return;
     case "extension_ui_request": {
-      if (e.method === "notify") { notice(plain(string(e.message))); return; }
+      if (e.method === "notify") {
+        notify(string(e.message), e.notifyType === "error" || e.notifyType === "warning" ? "error" : "info");
+        return;
+      }
       if (["setTitle","setStatus","setSubagentCost","setWidget","set_editor_text"].includes(string(e.method))) return;
       const id = string(e.id);
       if (id && ask?.requestId !== id) waiting.set(id, e);
@@ -233,15 +246,16 @@ async function submit(text: string) {
   catch (e) {
     busy = false;
     if (!editor.text) editor.reset(text);
-    notice(`Prompt not sent or not acknowledged: ${why(e)}`);
+    notice("");
+    notify(`Prompt not sent or not acknowledged: ${why(e)}`, "error");
   }
 }
 async function stop() {
   if (ask) return answer({ cancelled: true });
   if (!rpc || !busy) return;
   notice("Stopping…");
-  try { await rpc.abort({ awaitIdle: true }); busy = false; notice("Stopped"); }
-  catch (e) { notice(`Stop failed: ${why(e)}`); }
+  try { await rpc.abort({ awaitIdle: true }); busy = false; notice(""); notify("Stopped"); }
+  catch (e) { notice(busy ? "Working…" : ""); notify(`Stop failed: ${why(e)}`, "error"); }
 }
 function handle(i: Input) {
   if (closing) return;
