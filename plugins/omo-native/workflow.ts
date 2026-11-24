@@ -6,6 +6,7 @@ import type { ChecklistPhase } from "./transcript";
 import { displayStatus, short, unfinished, workflowSteps, type Step } from "./workflow-projection";
 
 const sheet = "workflow";
+export const workflowGraphMinWidth = 380;
 type Run = { readonly id: string; readonly title: string; readonly status: string };
 
 export function graph(steps: readonly Step[], dark: boolean): string | undefined {
@@ -122,7 +123,7 @@ export class Workflow {
 
   width(pixels: number) {
     // Below this width the graph's labels are less readable than the native rows.
-    const wide = pixels >= 420;
+    const wide = pixels >= workflowGraphMinWidth;
     if (wide !== this.#wide) { this.#wide = wide; this.#draw(); }
   }
   theme(dark: boolean) {

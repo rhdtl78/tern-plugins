@@ -35,7 +35,7 @@ test("a renderer without native workflow controls cannot offer the pane", () => 
   expect(supportsWorkflow({ features: ["aside", "blobs"], kinds: ["prefs", "image"] })).toBe(false);
 });
 
-test("uses the native DAG list when the graph no longer fits", async () => {
+test("shows the graph at the default pane width and keeps the list when narrowed", async () => {
   let rendered = Promise.withResolvers<void>();
   const frames: unknown[] = [];
   const workflow = new Workflow((...ops) => {
@@ -48,6 +48,8 @@ test("uses the native DAG list when the graph no longer fits", async () => {
       : { runId: "run", parentSessionId: "owner", nodes: [{ id: "A", state: "completed" }] };
     return { data: { ok: true, value } };
   } }, "owner", "/tmp");
+  // The 420px outer pane has 26px of chrome and padding.
+  workflow.width(394);
   workflow.toggle();
   await rendered.promise;
   expect(JSON.stringify(frames)).toContain("<svg");
@@ -57,6 +59,11 @@ test("uses the native DAG list when the graph no longer fits", async () => {
   await rendered.promise;
   expect(frames).toContainEqual(["graph", null]);
   expect(JSON.stringify(frames)).toContain("A · completed");
+  frames.length = 0;
+  rendered = Promise.withResolvers<void>();
+  workflow.width(394);
+  await rendered.promise;
+  expect(JSON.stringify(frames)).toContain("<svg");
 });
 
 test("a late duplicate or failed Todo cannot replace the latest cleared checklist", () => {

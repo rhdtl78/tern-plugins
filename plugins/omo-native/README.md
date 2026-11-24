@@ -36,7 +36,7 @@ Confirmation requests require an explicit choice. Enter doesn't approve them.
 
 ### View the workflow
 
-Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of the chat. You can also choose **OMO: Toggle Workflow** from the command palette when a local chat launched by the plugin has focus. The split starts closed and follows only the chat that opened it. Click **Close** or press **Escape** in the split to dismiss it without sending or clearing your draft.
+Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of the chat. You can also choose **OMO: Toggle Workflow** from the command palette when a local chat launched by the plugin has focus. The split starts closed and follows only the chat that opened it. When the window has room, Workflow targets an initial width of 420 px. Drag the divider to change its width. Click **Close** or press **Escape** in the split to dismiss it without sending or clearing your draft.
 
 - **DAG** lists this session's OmO runs. Select a run to see its status and dependencies. When the pane has room, arrows connect task cards from top to bottom. Select a node from the dependency list to see its predecessors and any available failure or blocked reason. The list remains available if the pane is narrow or Tern cannot draw the graph.
 - **Plan** shows the current session's Todo. If OmO associates a `/ulw-execute` plan with this session, **Open** opens that Markdown file in a Tern tab. The link appears again when you resume the same session. There is no manual link setup.

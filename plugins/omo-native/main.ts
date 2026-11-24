@@ -12,6 +12,7 @@ import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 
 const screen = new Surface(), editor = new Editor(), input = new InputStream();
+const workflowIntent = "workflow-open-intent";
 const frame = (...ops: Op[]) => screen.frame(...ops);
 let workflowFrame: ((...ops: Op[]) => void) | undefined;
 let workflowLaunch: AbortController | undefined;
@@ -167,7 +168,8 @@ async function start(hello: RpcRecord) {
         node("send", "kbd", { keys: ["enter"], role: "omp.composer.send", title: "Send message", actions: { click: "submit" }, hidden: true }),
       ]),
     ]),
-  ])), add(surface, node("layer", "col")), ["focus", resume ? null : "draft"]);
+  ])), add(surface, node("layer", "col", {}, [node(workflowIntent, "text", { hidden: true })])),
+  ["focus", resume ? null : "draft"]);
   if (resume) { status = ""; openPicker("sessions"); return; }
   try {
     await openSession(await resumeFields(args, cwd));
@@ -293,21 +295,23 @@ async function stop() {
 }
 function toggleWorkflow() {
   if (!workflowAvailable || picker || ask) return;
-  if (workflowLaunch) { workflowLaunch.abort(); return; }
+  if (workflowLaunch) { frame(["set", workflowIntent, { text: "" }]); workflowLaunch.abort(); return; }
   const pane = process.env.TERN_PANE, tern = Bun.which("tern");
   if (!ready || !pane || !tern) return;
   const controller = workflowLaunch = new AbortController();
+  const token = crypto.randomUUID().replaceAll("-", "");
+  frame(["set", workflowIntent, { text: token }]);
   const closed = () => {
     if (workflowLaunch !== controller) return;
     if (workflow.open) workflow.toggle();
     workflowLaunch = undefined; workflowFrame = undefined;
-    if (!closing) frame(["set", "workflow-toggle", { text: "Workflow" }]);
+    if (!closing) frame(["set", workflowIntent, { text: "" }], ["set", "workflow-toggle", { text: "Workflow" }]);
   };
-  workflowLifetime = launchWorkflowPane(tern, pane, controller.signal, workflowInput, send => {
+  workflowLifetime = launchWorkflowPane(tern, pane, token, controller.signal, workflowInput, send => {
     if (workflowLaunch !== controller || controller.signal.aborted || closing || !ready) { controller.abort(); return; }
     workflowFrame = send; workflow.toggle();
     send(["focus", "workflow"]);
-    frame(["set", "workflow-toggle", { text: "Hide Workflow" }]);
+    frame(["set", workflowIntent, { text: "" }], ["set", "workflow-toggle", { text: "Hide Workflow" }]);
   }, closed).catch(error => {
     closed();
     if (!closing) notify(`Could not open workflow: ${why(error)}`, "error");
@@ -397,8 +401,8 @@ function handle(i: Input) {
     case "exit": void close(); break;
   }
 }
-if (args[0] === "--workflow-pane" && args.length === 3 && args[1] && args[2]) {
-  workflowCompanion(args[1], args[2]);
+if (args[0] === "--workflow-pane" && args.length === 6 && args[1] && /^[a-f0-9]{32}$/.test(args[2]) && /^w\d{0,10}$/.test(args[4])) {
+  workflowCompanion(args[1], args[2], args[3], args[4].slice(1), args[5]);
 } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error("OMO Native needs a Tern pane with native program surfaces enabled."); process.exitCode = 1;
 } else {
