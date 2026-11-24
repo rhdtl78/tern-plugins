@@ -42,12 +42,17 @@ const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 function refresh() {
   const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
+  const backgroundView = background?.view;
+  const { agents, jobs } = backgroundView?.running ?? { agents: 0, jobs: 0 };
+  const running = [agents ? `${agents} agent${agents === 1 ? "" : "s"}` : "",
+    jobs ? `${jobs} job${jobs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   frame(["set", "draft", { text: editor.text, cursor: editor.cursor, readonly: !!picker || !ready || (!!ask && !ask.typed),
     placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
     ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
-    ["set", "session-activity", { hidden: !busy && !background?.view.active }]);
+    ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
+    ["set", "session-background-counts", { text: running, hidden: !running }]);
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
 function showStatus(text: typeof status) { status = text; refresh(); }
@@ -192,8 +197,14 @@ async function start(hello: RpcRecord) {
     .sf-col[data-id="composer"] > .sf-row[data-id="session-feedback"] {
       position: absolute;
       bottom: 100%;
-      left: 0;
+      left: 22px;
       pointer-events: none;
+    }
+    .sf-text[data-id="session-background-counts"] {
+      color: var(--t2);
+      font-size: .875em;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
     .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="line"] {
       min-height: 0;
@@ -246,6 +257,7 @@ async function start(hello: RpcRecord) {
       node("session-feedback", "row", { align: "center", gap: "sm" }, [
         node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
         node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
+        node("session-background-counts", "text", { hidden: true }),
       ]),
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),

@@ -325,6 +325,7 @@ export class Workflow {
         node("workflow-todo", "checklist", { mode: "full", phases: this.#todo, hidden: !this.#todo.length }),
         node("workflow-no-todo", "text", { hidden: !!this.#todo.length || !!this.#planPath, text: "No current plan or Todo." }),
       ]),
+      ...activity("agents"), ...activity("jobs"),
       this.#bar("dag", "DAG", this.#steps.length ? `${this.#steps.filter(s => s.status === "completed").length}/${this.#steps.length}` : ""),
       node("workflow-content", "col", { gap: "sm", hidden: !this.#expanded.dag }, [
       node("workflow-heading", "text", { text: title || "", hidden: !title || this.#runs.length > 1 }),
@@ -351,7 +352,7 @@ export class Workflow {
       node("workflow-node-detail", "text", { text: this.#detail(), hidden: !selected }),
       ...this.#neighbors(),
       node("workflow-result", "text", { text: selected?.result || "", hidden: !selected?.result }),
-    ])]), ...activity("agents"), ...activity("jobs")];
+    ])])];
   }
 
   #draw() {
