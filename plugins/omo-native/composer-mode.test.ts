@@ -17,6 +17,8 @@ test.each([
   ["~~~sh\nulw\n~~~\nResearch this", "research-preview"],
   ["```\nresearch", undefined],
   ["Do not run ulw; skip research", undefined],
+  ["Do not use ulw", undefined],
+  ["Do not use research", undefined],
 ] as const)("projects only an exact eligible draft keyword in %j", (text, expected) => {
   expect(new ComposerMode().border(text)).toBe(expected);
 });

@@ -9,7 +9,7 @@ type Border = Preview | "ulw-running" | undefined;
 // command names, paths, literals, negated mentions or partial words.
 const fenced = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n[\s\S]*?(?:^ {0,3}\1[ \t]*$|(?![\s\S])))?/gm;
 const literals = /^ {0,3}>[^\n]*|(?<!`)(`+)(?!`)[\s\S]*?(?:(?<!`)\1(?!`)|(?![\s\S]))|"[^"\n]*(?:"|$)|“[^”\n]*(?:”|$)|(?<![\p{L}\p{N}])'[^'\n]*(?:'|$)|‘[^’\n]*(?:’|$)|\b[a-z][a-z\d+.-]*:\/\/\S+/gimu;
-const negated = /\b(?:avoid(?:ing)?|skip(?:ping)?|without|no|never|do\s+not|don['’]t|dont)\s+(?:(?:using|use\s+of|the|run|invoke|start|trigger|arm|enable)\s+)*(?:ultrawork|ulw|research)\b/giu;
+const negated = /\b(?:avoid(?:ing)?|skip(?:ping)?|without|no|never|do\s+not|don['’]t|dont)\s+(?:(?:using|use(?:\s+of)?|the|run|invoke|start|trigger|arm|enable)\s+)*(?:ultrawork|ulw|research)\b/giu;
 const keywords = /(?<![\p{L}\p{N}\p{M}_/\\.-])(?:ultrawork|ulw|research)(?![\p{L}\p{N}\p{M}_/\\-]|\.[\p{L}\p{N}\p{M}_])/giu;
 
 function draftPreview(text: string): Preview | undefined {
