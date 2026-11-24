@@ -52,7 +52,8 @@ export class Transcript {
   #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; checklist: boolean }>();
   #folds = new Map<string, boolean>();
   constructor(private readonly frame: (...ops: Op[]) => void,
-    private readonly onTodo?: (phases: readonly ChecklistPhase[]) => void) {}
+    private readonly onTodo?: (phases: readonly ChecklistPhase[]) => void,
+    private readonly authorIcon?: string) {}
   #seenTodo = new Set<string>();
   get populated() { return this.#seq !== 0; }
 
@@ -118,8 +119,13 @@ export class Transcript {
     }
     const id = `m${++this.#seq}`;
     if (assistant) this.#assistant = id;
-    this.frame(add("main", node(id, "message", { side: assistant ? "start" : "end", author: assistant ? "OMO" : "You", variant: "auto" },
-      [node(id + ".body", assistant ? "md" : "text", { text })])));
+    const avatar = assistant && this.authorIcon ? node(id + ".author", "image", {
+      blob: this.authorIcon, alt: "OMO", actions: { click: "ignore" },
+    }) : undefined;
+    this.frame(add("main", node(id, "message", {
+      side: assistant ? "start" : "end", variant: "auto",
+      ...(avatar ? { avatar: avatar.id } : { author: assistant ? "OMO" : "You" }),
+    }, [...(avatar ? [avatar] : []), node(id + ".body", assistant ? "md" : "text", { text })])));
   }
   message(m: RpcRecord) {
     switch (m.role) {

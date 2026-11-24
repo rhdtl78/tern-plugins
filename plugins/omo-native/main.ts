@@ -4,6 +4,7 @@ import { OmoRpc, RpcCommandError, type RpcRecord } from "./rpc";
 import { add, InputStream, node, plain, record, string, Surface, surface, type Input, type Op } from "./surface";
 import { Editor, isStopKey, type SubmitMode } from "./editor";
 import { Transcript } from "./transcript";
+import omoIcon from "./omo-icon.svg" with { type: "text" };
 import { dialog } from "./dialog";
 import { resumeFields, sessionActivity } from "./session";
 import { listSavedSessions } from "./history";
@@ -21,7 +22,7 @@ let workflowFrame: ((...ops: Op[]) => void) | undefined;
 let workflowLaunch: AbortController | undefined;
 let workflowLifetime: Promise<void> | undefined;
 const workflow = new Workflow((...ops) => workflowFrame?.(...ops));
-const transcript = new Transcript(frame, phases => workflow.todo(phases));
+let transcript: Transcript;
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
 let background: ActivityProjection | undefined, quota: UsageMeter | undefined;
@@ -166,6 +167,14 @@ async function start(hello: RpcRecord) {
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
+  let authorIcon: string | undefined;
+  if (Array.isArray(hello.features) && hello.features.includes("blobs") &&
+    Array.isArray(hello.kinds) && hello.kinds.includes("image")) {
+    const bytes = Buffer.from(omoIcon);
+    authorIcon = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
+  }
+  transcript = new Transcript(frame, phases => workflow.todo(phases), authorIcon);
   screen.send("s", { sf: surface, name: "omo-composer", css: `
     .sf-col[data-id="composer"][data-role="omp.editor"] {
       background: var(--raise);

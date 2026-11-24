@@ -76,6 +76,30 @@ test("chunked frame bodies survive control characters, parameter-like text and s
   expect(JSON.parse(Buffer.concat(stripped).toString())).toEqual({ text });
 });
 
+test("streaming and saved replies identify OMO through the native avatar slot", () => {
+  const live: Op[] = [], saved: Op[] = [];
+  const streamed = new Transcript((...ops) => live.push(...ops), undefined, "fixture-icon");
+  const restored = new Transcript((...ops) => saved.push(...ops), undefined, "fixture-icon");
+  const reply = { role: "assistant", content: "One **reply**." };
+  for (const delta of ["One ", "**reply**."]) {
+    streamed.event({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } });
+  }
+  streamed.event({ type: "message_end", message: reply });
+  restored.message(reply);
+  for (const ops of [live, saved]) {
+    const messages = ops.filter(op => op[0] === "add");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.[4]).toMatchObject({
+      k: "message", p: { avatar: "m1.author" },
+      c: [{ id: "m1.author", k: "image", p: { blob: "fixture-icon", alt: "OMO" } }, { k: "md" }],
+    });
+    expect(messages[0]?.[4]).not.toMatchObject({ p: { author: "OMO" } });
+  }
+  expect(live.slice(1)).toEqual([
+    ["text", "m1.body", "append", "**reply**."], ["text", "m1.body", "replace", reply.content],
+  ]);
+});
+
 test("restored calls and result events share a disclosure and keep output literal", () => {
   const ops: Op[] = [];
   const t = new Transcript((...o) => ops.push(...o));
@@ -83,7 +107,7 @@ test("restored calls and result events share a disclosure and keep output litera
   t.message({ role: "assistant", content: [{ type: "toolCall", id: "call", name: "read", arguments: { path: "x.ts" } }] });
   t.event({ type: "tool_execution_end", toolCallId: "call", result: { content: [{ type: "text", text: "\x1b[31m<b>text</b>" }] } });
   expect(ops.filter(o => o[0] === "add")).toHaveLength(2);
-  expect(ops[0]?.[4]).toMatchObject({ c: [{ k: "text", p: { text: "<a>**not Markdown**</a>" } }] });
+  expect(ops[0]?.[4]).toMatchObject({ p: { author: "You" }, c: [{ k: "text", p: { text: "<a>**not Markdown**</a>" } }] });
   expect(ops[1]?.[4]).toMatchObject({ k: "tool", p: { collapsed: true }, c: [{ k: "code" }] });
   expect(ops.at(-1)?.slice(2)).toEqual(["replace", "<b>text</b>"]);
   t.flipTools();
