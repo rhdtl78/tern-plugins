@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { ActivityProjection } from "./activity";
+import { Workflow } from "./workflow";
+import { record, type Op } from "./surface";
 
 const route = "rpc-1", durable = "owning-session-uuid";
 const agent = {
@@ -25,17 +27,75 @@ const push = (seq: number, background: unknown[], state?: string) => ({
 });
 const make = () => new ActivityProjection(route, durable);
 
+// Apply the same mount/set/delete rules as a native subtree. An update to a
+// nonexistent row cannot create it; deleting its parent must remove old rows.
+function panelFixture() {
+  const nodes = new Map<string,{ p: ReturnType<typeof record>; parent: string }>();
+  const remove = (id: string) => {
+    nodes.delete(id);
+    for (const [key, item] of nodes) if (item.parent === id) remove(key);
+  };
+  const mount = (data: unknown, parent: string) => {
+    const n = record(data);
+    nodes.set(String(n.id), { p: record(n.p), parent });
+    if (Array.isArray(n.c)) n.c.forEach(c => mount(c, String(n.id)));
+  };
+  const frame = (...ops: Op[]) => {
+    for (const [action,id,p,,child] of ops) {
+      if (action === "add") mount(child, String(p));
+      if (action === "del") remove(String(id));
+      const n = nodes.get(String(id));
+      if (action === "set" && n) Object.assign(n.p, record(p));
+    }
+  };
+  const workflow = new Workflow(frame), activity = make();
+  const pushView = () => workflow.background(activity.view);
+  return { workflow, activity, pushView, props: (id: string) => nodes.get(`workflow-${id}`)?.p };
+}
+
+test("owner activity badges count work rather than capped rows", () => {
+  const {workflow, activity, pushView, props} = panelFixture();
+  workflow.toggle();
+  activity.observe(push(1,[bash])); activity.observe(update([agent])); pushView();
+  expect(props("agents-count")?.text).toBe("1");
+  expect(props("jobs-0")?.text).toBe("Detached job · 1 · running");
+  activity.observe(update(Array.from({length:16},(_,i)=>({...agent, task_id:`st_${i.toString(16).padStart(8,"0")}`})))); pushView();
+  expect(props("agents-count")?.text).toBe("16");
+  expect(props("jobs-count")?.text).toBe("1");
+  expect(props("jobs-0")?.text).toBe("Detached job · 1 · running");
+  activity.observe(update([], "foreign")); pushView();
+  expect(props("agents-count")?.text).toBe("16");
+  activity.observe(update([])); activity.observe(push(2,[{...bash,activeCount:3,items:[]}])); pushView();
+  expect(props("agents-bar")?.hidden).toBe(true);
+  expect(props("jobs-count")?.text).toBe("3");
+  expect(props("jobs-0")?.text).toBe("3 detached jobs · running");
+  activity.observe(push(3,[])); pushView();
+  expect(props("jobs-bar")?.hidden).toBe(true);
+  expect(props("jobs-0")).toBeUndefined();
+});
+
+for (const startsLive of [false,true]) test(`reopen reconciles jobs from the mounted ${startsLive ? "populated" : "empty"} body`, () => {
+  const {workflow,activity,pushView,props}=panelFixture();
+  let seq=0;
+  const change=(live:boolean)=>{activity.observe(push(++seq,live?[bash]:[]));pushView();};
+  workflow.toggle(); change(true);
+  if(startsLive) change(false);
+  workflow.toggle(); change(startsLive); workflow.toggle(); change(!startsLive);
+  expect(props("jobs-0")?.text).toBe(startsLive ? undefined : "Detached job · 1 · running");
+  expect(props("jobs-bar")?.hidden).toBe(startsLive);
+});
+
 test("cold restores owned terminal sources and clears them on newer empty lifecycle", () => {
   const activity = make();
   expect(activity.restore({ sessionId: durable, lifecycle: lifecycle(2, [bash, monitor]) })).toBe(true);
-  expect(activity.view).toEqual({ active: true, rows: [
+  expect(activity.view).toEqual({ active: true, counts: { agent: 0, bash: 1, monitor: 1 }, rows: [
     { id: "bash:bash_1", kind: "bash", status: "running", label: "Detached job · 1" },
     { id: "monitor:mon_1PYH050XYJ1NJ6X8", kind: "monitor", status: "running", label: "Monitor · 1PYH050XYJ1NJ6X8" },
   ] });
 
   activity.observe(push(3, []));
   expect(activity.restore({ sessionId: durable, lifecycle: lifecycle(2, [bash]) })).toBe(false);
-  expect(activity.view).toEqual({ active: false, rows: [] });
+  expect(activity.view).toEqual({ active: false, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
 test("uses authoritative counts when detail is truncated or missing", () => {
@@ -54,7 +114,7 @@ test("ignores widgets including live task duplicates and retained done or fallba
     { id: "bash_3", kind: "bash", state: "live" },
   ] }));
 
-  expect(activity.view).toEqual({ active: true, rows: [
+  expect(activity.view).toEqual({ active: true, counts: { agent: 1, bash: 0, monitor: 0 }, rows: [
     { id: "agent:st_01a20c83", kind: "agent", status: "running", label: "Review workspace changes" },
   ] });
 });
@@ -97,7 +157,7 @@ test("only projects owned resident task runners with supported modes and states"
     ["agent:st_01a20c82", "running"], ["agent:st_01a20c81", "queued"], ["agent:st_01a20c83", "paused"],
   ]);
   activity.observe(update([task(2, { status: "completed" })]));
-  expect(activity.view).toEqual({ active: false, rows: [] });
+  expect(activity.view).toEqual({ active: false, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
 test("same-owner push wins over in-flight pulls; reset fences old replies and a new pull can restore", () => {
@@ -138,7 +198,7 @@ test("user Stop holds wakes without cancelling jobs; a muted monitor remains reg
   expect(activity.view.active).toBe(false);
   expect(activity.view.rows.map(row => row.status)).toEqual(["paused"]);
   activity.observe(push(5, []));
-  expect(activity.view).toEqual({ active: false, rows: [] });
+  expect(activity.view).toEqual({ active: false, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
 test("bounds sidebar rows without deriving liveness from the displayed rows", () => {
@@ -149,6 +209,8 @@ test("bounds sidebar rows without deriving liveness from the displayed rows", ()
   activity.observe(update(tasks));
   activity.observe(push(1, [bash]));
   expect(activity.view.active).toBe(true);
-  expect(activity.view.rows).toHaveLength(16);
+  expect(activity.view.counts).toEqual({ agent: 24, bash: 1, monitor: 0 });
+  expect(activity.view.rows.filter(row => row.kind === "agent")).toHaveLength(16);
+  expect(activity.view.rows).toHaveLength(17);
   expect(activity.view.rows[0]?.kind).toBe("bash");
 });

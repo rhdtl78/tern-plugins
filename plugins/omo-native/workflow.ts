@@ -3,7 +3,7 @@ import { sessionPlanPath } from "./plan-link";
 import { RpcCommandError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
-import type { ActivityRow } from "./activity";
+import type { ActivityView } from "./activity";
 import { displayStatus, short, unfinished, workflowLayers, workflowSteps, type Step } from "./workflow-projection";
 
 const sheet = "workflow";
@@ -122,17 +122,19 @@ export class Workflow {
     this.#menuCursor = "";
     this.#runs = []; this.#steps = [];
     this.#manualRun = this.#selected = this.#selectedStep = this.#summary = "";
-    this.#background = [];
+    this.#background = undefined;
   }
 
-  #background: readonly ActivityRow[] = [];
+  #background?: ActivityView;
 
-  background(rows: readonly ActivityRow[]) {
-    if (rows.length === this.#background.length && rows.every((row, index) => {
-      const old = this.#background[index];
+  background(view: ActivityView) {
+    const previous = this.#background, { rows, counts } = view;
+    if (previous && counts.agent === previous.counts.agent && counts.bash === previous.counts.bash &&
+        counts.monitor === previous.counts.monitor && rows.length === previous.rows.length && rows.every((row, index) => {
+      const old = previous.rows[index];
       return row.id === old?.id && row.label === old.label && row.status === old.status;
     })) return;
-    this.#background = rows;
+    this.#background = view;
     if (this.#open) this.#draw();
   }
 
@@ -168,7 +170,12 @@ export class Workflow {
     this.#revision++;
     this.#resetPlan();
     if (this.#open) {
-      this.frame(add("main", node(sheet, "col", { gap: "sm" }, this.#children())),
+      const children = this.#children();
+      for (const child of children) {
+        if (child.id === "workflow-agents-body" || child.id === "workflow-jobs-body")
+          this.#rowCounts.set(child.id, child.c.length);
+      }
+      this.frame(add("main", node(sheet, "col", { gap: "sm" }, children)),
         ...this.#controls(), this.#graph());
       this.#dagLayout = this.#layout();
       if (this.#source) { this.#invalidate(); void this.refreshUsage(); }
@@ -308,9 +315,11 @@ export class Workflow {
     };
     const layers = workflowLayers(this.#steps);
     const activity = (section: "agents" | "jobs") => {
-      const rows = this.#background.filter(r => (r.kind === "agent") === (section === "agents"));
-      return [this.#bar(section, section === "agents" ? "Agents" : "Jobs", `${rows.length}`, !rows.length),
-        node(`workflow-${section}-body`, "col", { hidden: !rows.length || !this.#expanded[section] },
+      const rows = this.#background?.rows.filter(r => (r.kind === "agent") === (section === "agents")) ?? [];
+      const counts = this.#background?.counts;
+      const count = !counts ? 0 : section === "agents" ? counts.agent : counts.bash + counts.monitor;
+      return [this.#bar(section, section === "agents" ? "Agents" : "Jobs", `${count}`, !count),
+        node(`workflow-${section}-body`, "col", { hidden: !count || !this.#expanded[section] },
           rows.map((r, i) => node(`workflow-${section}-${i}`, "text", { text: `${r.label} · ${r.status}` })))];
     };
     return [this.#bar("usage", "Usage", "", !this.#usage),

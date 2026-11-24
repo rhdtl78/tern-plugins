@@ -132,7 +132,7 @@ function onRpc(e: RpcRecord) {
   void quota?.event(e);
   if (e.type === "model_changed" && Object.keys(record(e.model)).length) showModel(e.model);
   if (background?.observe(e)) {
-    workflow.background(background.view.rows);
+    workflow.background(background.view);
     refresh();
   }
   workflow.event(e);
@@ -282,12 +282,12 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (owner) {
       const projection = background = new ActivityProjection(sessionId, owner);
       projection.restore(state);
-      workflow.background(projection.view.rows);
+      workflow.background(projection.view);
       const accept = projection.beginTaskList();
       void client.request("extension_request", { name: "omo.task.list", data: { parent_session_id: owner } })
         .then(reply => {
           if (background === projection && !closing && accept(reply)) {
-            workflow.background(projection.view.rows);
+            workflow.background(projection.view);
             refresh();
           }
         }, () => { /* Older hosts may not ship the OmO task extension. */ });

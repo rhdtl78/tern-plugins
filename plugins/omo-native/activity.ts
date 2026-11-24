@@ -8,6 +8,7 @@ export type ActivityRow = {
 export type ActivityView = {
   readonly active: boolean;
   readonly rows: readonly ActivityRow[];
+  readonly counts: Readonly<Record<ActivityRow["kind"], number>>;
 };
 
 const MAX_ENTRIES = 256;
@@ -148,9 +149,12 @@ export class ActivityProjection {
       ...monitorRows,
     ];
     const active = all.filter(row => row.status === "running");
+    const ordered = [...active, ...all.filter(row => row.status !== "running")];
+    const shown = { agent: 0, bash: 0, monitor: 0 };
     return {
       active: active.length > 0,
-      rows: [...active, ...all.filter(row => row.status !== "running")].slice(0, MAX_ROWS),
+      counts: { agent: this.#tasks?.length ?? 0, bash: this.#terminal?.bash?.count ?? 0, monitor: monitor?.count ?? 0 },
+      rows: ordered.filter(row => shown[row.kind]++ < MAX_ROWS),
     };
   }
 
