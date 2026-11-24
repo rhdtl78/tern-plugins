@@ -8,10 +8,16 @@ import { dialog } from "./dialog";
 import { resumeFields, sessionActivity } from "./session";
 import { listSavedSessions } from "./history";
 import { applyModel, availableModels, Picker, savedRows, selectedSession } from "./picker";
+import { supportsWorkflow, Workflow } from "./workflow";
+import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 
 const screen = new Surface(), editor = new Editor(), input = new InputStream();
 const frame = (...ops: Op[]) => screen.frame(...ops);
-const transcript = new Transcript(frame);
+let workflowFrame: ((...ops: Op[]) => void) | undefined;
+let workflowLaunch: AbortController | undefined;
+let workflowLifetime: Promise<void> | undefined;
+const workflow = new Workflow((...ops) => workflowFrame?.(...ops));
+const transcript = new Transcript(frame, phases => workflow.todo(phases));
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
 let live = false, ready = false, closing = false, busy = false, welcome = true;
@@ -19,6 +25,7 @@ let status: "" | "Opening session…" | "Working…" | "Stopping…" = "Opening 
 let seq = 0, answering = false, savedDraft = "", failureShown = false;
 let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
+let workflowAvailable = false;
 let toastId: string | undefined;
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
 const waiting = new Map<string, RpcRecord>();
@@ -46,6 +53,8 @@ function notify(text: string, tone: "info" | "error" = "info") {
 }
 function fail(e: unknown) {
   ready = false; busy = false;
+  unsubscribe?.(); workflow.disconnect();
+  if (!workflow.open) workflowLaunch?.abort();
   removePicker();
   if (welcome) { welcome = false; frame(["del", "welcome"]); }
   const text = `${why(e)}. Close this pane or press Ctrl+D.`;
@@ -61,7 +70,9 @@ function fail(e: unknown) {
 async function close() {
   if (closing) return;
   closing = true; clearTimeout(timer); clearTimeout(esc); unsubscribe?.();
-  try { await rpc?.close(); }
+  workflow.disconnect();
+  workflowLaunch?.abort();
+  try { await Promise.all([rpc?.close(), workflowLifetime]); }
   finally {
     if (live) screen.send("x", { id: surface, keep: !resume || ready });
     process.stdout.write("\x1b[<u\x1b[?2004l");
@@ -106,8 +117,11 @@ async function answer(fields: RpcRecord) {
 }
 function onRpc(e: RpcRecord) {
   if (closing) return;
+  if (e.type === "session_closed") { fail("OmO session closed"); return; }
+  workflow.event(e);
   const active = sessionActivity(e.type);
   if (active !== undefined) {
+    if (!active) void workflow.refreshPlan();
     if (active) removePicker();
     if (active !== busy || active) { busy = active; showStatus(active ? "Working…" : ""); }
     return;
@@ -130,6 +144,7 @@ function onRpc(e: RpcRecord) {
 }
 async function start(hello: RpcRecord) {
   clearTimeout(timer); live = true; screen.negotiate(hello);
+  workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
   frame(add(surface, node("main", "col", {}, [
@@ -145,6 +160,8 @@ async function start(hello: RpcRecord) {
       ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
         node("model", "button", { text: "OMO", variant: "quiet", title: "Choose model", disabled: true,
           actions: { click: "models" } }), node("gap", "row", { grow: 1 }),
+        ...(workflowAvailable ? [node("workflow-toggle", "button", { text: "Workflow", variant: "quiet",
+          title: "Toggle workflow (Ctrl+G)", actions: { click: "workflow" } })] : []),
         node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
         node("stop", "button", { text: "Stop", actions: { click: "stop" }, hidden: true }),
         node("send", "kbd", { keys: ["enter"], role: "omp.composer.send", title: "Send message", actions: { click: "submit" }, hidden: true }),
@@ -161,14 +178,19 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     const command = Bun.which("omo") ?? Bun.which(join(dirname(process.execPath), "omo")) ?? Bun.which(join(homedir(), ".bun/bin/omo"));
     if (!command) throw new Error("Could not find the omo executable");
     const client = rpc = new OmoRpc({ cwd, argv: [command, "--mode", "rpc", "--listen", "stdio://"],
-      env: { PATH: [process.env.PATH, dirname(process.execPath)].filter(Boolean).join(":") },
-      capabilities: ["interactive_user","question"] });
+      env: { PATH: [process.env.PATH, dirname(process.execPath)].filter(Boolean).join(":"),
+        // The installed OmO DAG bridge checks the startup capability for push.
+        ...(workflowAvailable ? { SENPI_RPC_CLIENT_CAPABILITIES: "extension_events" } : {}) },
+      capabilities: ["interactive_user","question", ...(workflowAvailable ? ["extension_events"] : [])] });
     const pending: RpcRecord[] = [];
     unsubscribe = client.onEvent(e => ready ? onRpc(e) : pending.push(e));
     const { state } = await client.openSession({ auto_title: false, ...fields });
     await verify?.();
     if (closing) return;
-    for (const message of await client.getMessages()) transcript.message(message);
+    const history = await client.getMessages();
+    if (closing) return;
+    if (workflowAvailable) workflow.bind(client, string(state.sessionId), string(state.cwd) || cwd);
+    for (const message of history) transcript.message(message);
     busy = state.isStreaming === true; ready = true; status = busy ? "Working…" : "";
     showModel(state.model);
     frame(["focus", "draft"]);
@@ -249,6 +271,7 @@ async function submit(text: string) {
     const reply = await rpc.prompt(text);
     // A slash command may finish inside an extension without any agent_idle.
     if (record(reply.data).disposition === "handled") {
+      void workflow.refreshPlan();
       busy = false;
       if (status === "Working…") status = "";
       refresh();
@@ -268,6 +291,68 @@ async function stop() {
   try { await rpc.abort({ awaitIdle: true }); busy = false; showStatus(""); notify("Stopped"); }
   catch (e) { showStatus(busy ? "Working…" : ""); notify(`Stop failed: ${why(e)}`, "error"); }
 }
+function toggleWorkflow() {
+  if (!workflowAvailable || picker || ask) return;
+  if (workflowLaunch) { workflowLaunch.abort(); return; }
+  const pane = process.env.TERN_PANE, tern = Bun.which("tern");
+  if (!ready || !pane || !tern) return;
+  const controller = workflowLaunch = new AbortController();
+  const closed = () => {
+    if (workflowLaunch !== controller) return;
+    if (workflow.open) workflow.toggle();
+    workflowLaunch = undefined; workflowFrame = undefined;
+    if (!closing) frame(["set", "workflow-toggle", { text: "Workflow" }]);
+  };
+  workflowLifetime = launchWorkflowPane(tern, pane, controller.signal, workflowInput, send => {
+    if (workflowLaunch !== controller || controller.signal.aborted || closing || !ready) { controller.abort(); return; }
+    workflowFrame = send; workflow.toggle();
+    send(["focus", "workflow"]);
+    frame(["set", "workflow-toggle", { text: "Hide Workflow" }]);
+  }, closed).catch(error => {
+    closed();
+    if (!closing) notify(`Could not open workflow: ${why(error)}`, "error");
+  });
+}
+function workflowInput(i: Input) {
+  if (closing || workflowLaunch?.signal.aborted || !workflow.open) return;
+  if (i.kind === "event" && i.value.ev === "resize") {
+    const cellWidth = record(i.value.cell).w;
+    if (typeof i.value.cols === "number" && typeof cellWidth === "number" && cellWidth > 1) {
+      workflow.width(i.value.cols * cellWidth);
+    }
+    return;
+  }
+  if (i.kind === "event" && i.value.ev === "theme" && typeof i.value.dark === "boolean") {
+    workflow.theme(i.value.dark); return;
+  }
+  if (i.kind === "event" && i.value.ev === "action") {
+    const { id, act } = i.value;
+    if (id === "workflow-close" && act === "close") { workflowLaunch?.abort(); return; }
+    if ((id === "workflow-dag" || id === "workflow-plan") && act === "page") {
+      workflow.action({ id: "workflow", act: "page", value: id === "workflow-plan" ? "plan" : "dag" });
+      return;
+    }
+    if (id === "workflow-file" && act === "open-file" && !ask && !picker) {
+      const launch = workflowLaunch;
+      const tern = Bun.which("tern"), pane = process.env.TERN_PANE;
+      if (tern && pane && launch) void workflow.refreshPlan(path => {
+        if (closing || ask || picker || workflowLaunch !== launch || launch.signal.aborted) return;
+        const opener = Bun.spawn([tern, "open", "--tab", path], { stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 4000 });
+        void opener.exited.then(code => {
+          if (code !== 0 && !closing && workflowLaunch === launch && !launch.signal.aborted) notify("Tern could not open the selected Markdown file.", "error");
+        });
+      });
+      return;
+    }
+  }
+  if (i.kind === "event" && i.value.ev === "action" && (i.value.act === "select-run" || i.value.act === "select-step")) {
+    workflow.action(i.value);
+    return;
+  }
+  if (i.kind !== "key") return;
+  if (["\x1b", "\x1b[27u", "\x07", "\x1b[103;5u"].includes(i.value)) workflowLaunch?.abort();
+  else workflow.key(i.value);
+}
 function handle(i: Input) {
   if (closing) return;
   if (i.kind === "key" && (i.value === "\x04" || i.value === "\x1b[100;5u")) { void close(); return; }
@@ -286,6 +371,7 @@ function handle(i: Input) {
       case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
       case "send": if (e.id === "draft" && !ask) void submit(string(e.text)); return;
       case "action":
+        if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
         if (e.id === "model" && e.act === "models") openPicker("models");
         if (e.id === "stop" && e.act === "stop") void stop();
         if (e.id === "send" && e.act === "submit") void submit(editor.text);
@@ -297,6 +383,7 @@ function handle(i: Input) {
     }
   }
   if (picker) { pickerInput(picker, i); return; }
+  if (i.kind === "key" && (i.value === "\x07" || i.value === "\x1b[103;5u")) { toggleWorkflow(); return; }
   if (!live || !ready || (ask && !ask.typed && i.kind !== "key")) return;
   if (ask && !ask.typed) {
     if (i.value === "\x1b" || i.value === "\x03") void stop();
@@ -310,7 +397,9 @@ function handle(i: Input) {
     case "exit": void close(); break;
   }
 }
-if (!process.stdin.isTTY || !process.stdout.isTTY) {
+if (args[0] === "--workflow-pane" && args.length === 3 && args[1] && args[2]) {
+  workflowCompanion(args[1], args[2]);
+} else if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error("OMO Native needs a Tern pane with native program surfaces enabled."); process.exitCode = 1;
 } else {
   process.stdin.setRawMode(true).setEncoding("utf8").on("data", (chunk: string) => {

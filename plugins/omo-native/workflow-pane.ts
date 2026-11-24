@@ -1,0 +1,161 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createConnection, createServer, type Socket } from "node:net";
+import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
+import { add, InputStream, node, record, Surface, surface, type Input, type Op } from "./surface";
+
+/** The daemon launches the companion by argv. Only this chat's private socket carries its view. */
+export async function launchWorkflowPane(tern: string, pane: string, signal: AbortSignal, onInput: (input: Input) => void,
+  onReady: (frame: (...ops: Op[]) => void) => void, onClose: () => void) {
+  const dir = await mkdtemp(join(tmpdir(), "tern-workflow-"));
+  const path = join(dir, "view.sock");
+  const token = crypto.randomUUID();
+  let active: Socket | undefined;
+  let done = false;
+  let launch: ReturnType<typeof Bun.spawn> | undefined;
+  const lifetime = Promise.withResolvers<void>();
+  const sockets = new Set<Socket>();
+  const server = createServer(socket => {
+    sockets.add(socket);
+    socket.on("error", () => socket.destroy());
+    socket.on("close", () => { sockets.delete(socket); if (socket === active) finish(); });
+    const lines = createInterface({ input: socket, crlfDelay: Infinity });
+    lines.on("line", line => {
+      if (done || line.length > 65536) { socket.destroy(); return; }
+      if (socket !== active) {
+        if (active || line !== token) { socket.destroy(); return; }
+        active = socket;
+        clearTimeout(timeout);
+        onReady((...ops) => { if (!done && active === socket) socket.write(JSON.stringify(ops) + "\n"); });
+        return;
+      }
+      let value: unknown;
+      try { value = JSON.parse(line); } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        socket.destroy(); return;
+      }
+      const input = record(value);
+      if (input.kind === "event") onInput({ kind: "event", value: record(input.value) });
+      if ((input.kind === "key" || input.kind === "paste") && typeof input.value === "string") {
+        onInput({ kind: input.kind, value: input.value });
+      }
+    });
+  });
+  const timer = () => finish();
+  const timeout = setTimeout(timer, 5000);
+  function finish() {
+    if (done) return;
+    done = true;
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", finish);
+    for (const socket of sockets) socket.destroy();
+    launch?.kill();
+    server.close(() => {
+      void Promise.resolve(launch?.exited).then(() => rm(dir, { force: true, recursive: true }))
+        .then(() => { onClose(); lifetime.resolve(); }, error => { onClose(); lifetime.reject(error); });
+    });
+  }
+  signal.addEventListener("abort", finish, { once: true });
+  if (signal.aborted) { finish(); return lifetime.promise; }
+  server.once("error", finish);
+  server.listen(path, () => {
+    if (done) { server.close(); return; }
+    launch = Bun.spawn([tern, "split", pane, "right", "--", process.execPath,
+      process.argv[1] ?? "", "--workflow-pane", path, token],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 4500 });
+    void launch.exited.then(code => { if (code !== 0) finish(); });
+  });
+  return lifetime.promise;
+}
+
+export function workflowCompanion(path: string, token: string) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+  const screen = new Surface();
+  const input = new InputStream();
+  let socket: Socket | undefined;
+  let viewport: Input | undefined;
+  let theme: Input | undefined;
+  let escape: ReturnType<typeof setTimeout>;
+  const timeout = setTimeout(stop, 4000);
+  function stop() {
+    clearTimeout(timeout); clearTimeout(escape);
+    socket?.destroy(); process.stdin.pause(); process.stdin.setRawMode(false);
+    screen.send("x", { id: surface, keep: false });
+    process.exit(0);
+  }
+  function event(i: Input) {
+    if (i.kind === "event" && !socket && i.value.r === "hello" && i.value.v === 1) {
+      screen.negotiate(i.value);
+      const graphAllowed = Array.isArray(i.value.features) && i.value.features.includes("blobs") &&
+        Array.isArray(i.value.kinds) && i.value.kinds.includes("image");
+      viewport = { kind: "event", value: { ev: "resize", cols: i.value.cols, cell: i.value.cell } };
+      if (typeof i.value.dark === "boolean") theme = { kind: "event", value: { ev: "theme", dark: i.value.dark } };
+      let lastBlob = "";
+      let graphMounted = false;
+      screen.send("o", { id: surface, mode: "screen", title: "Workflow", closable: true });
+      // Tern 0.9.32 may omit pane resize events. Measure against the graph's
+      // parent width, not the window: below the threshold the native list remains.
+      screen.send("s", { sf: surface, name: "workflow-graph", css:
+        ".sf-image[data-id='workflow-graph'] { width: clamp(0px, calc((100% - 419px) * 500), 100%); overflow: hidden; }" });
+      screen.frame(add(surface, node("main", "col")), add(surface, node("dock", "col", {}, [
+          node("workflow-controls", "row", { gap: "sm", wrap: true }, [
+          node("workflow-dag", "button", { text: "DAG", actions: { click: "page" } }),
+          node("workflow-plan", "button", { text: "Plan", actions: { click: "page" } }),
+          node("workflow-close", "button", { text: "Close", actions: { click: "close" } }),
+        ]),
+      ])));
+      socket = createConnection(path);
+      socket.once("connect", () => {
+        clearTimeout(timeout);
+        socket?.write(token + "\n");
+        if (viewport) socket?.write(JSON.stringify(viewport) + "\n");
+        if (theme) socket?.write(JSON.stringify(theme) + "\n");
+      });
+      socket.on("error", stop).on("close", stop);
+      createInterface({ input: socket, crlfDelay: Infinity }).on("line", line => {
+        const ops: unknown = JSON.parse(line);
+        if (!Array.isArray(ops) || !ops.every(Array.isArray)) return;
+        for (const op of ops) {
+          if (op[0] !== "graph") {
+            if (op[0] === "del" && (op[1] === "workflow-content" || op[1] === "workflow")) graphMounted = false;
+            screen.frame(op); continue;
+          }
+          const svg = op[1];
+          if (!graphAllowed || typeof svg !== "string" || svg.length > 8000) {
+            if (graphMounted) screen.frame(["del", "workflow-graph"]);
+            graphMounted = false;
+            continue;
+          }
+          const id = createHash("sha256").update(svg).digest("hex");
+          if (id !== lastBlob) {
+            process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${Buffer.from(svg).toString("base64")}\x1b\\`);
+            lastBlob = id;
+          }
+          if (graphMounted) screen.frame(["set", "workflow-graph", { blob: id }]);
+          else screen.frame(["add", "workflow-graph", "workflow-graph-anchor", null,
+            node("workflow-graph", "image", { blob: id, alt: "DAG dependency arrows; dependencies are also listed below." })]);
+          graphMounted = true;
+        }
+      });
+      return;
+    }
+    if (i.kind === "event" && i.value.ev === "theme" && typeof i.value.dark === "boolean") {
+      theme = i;
+      if (!socket?.connecting) socket?.write(JSON.stringify(i) + "\n");
+      return;
+    }
+    if (i.kind === "event" && i.value.sf !== surface) return;
+    if (i.kind === "event" && i.value.ev === "resize") viewport = i;
+    if (i.kind === "event" && i.value.ev === "ack") { screen.ack(i.value.s); return; }
+    if (i.kind === "event" && i.value.ev === "gone") { stop(); return; }
+    if (!socket?.connecting) socket?.write(JSON.stringify(i) + "\n");
+  }
+  process.stdin.setRawMode(true).setEncoding("utf8").on("data", (chunk: string) => {
+    clearTimeout(escape); input.feed(chunk).forEach(event);
+    if (chunk.endsWith("\x1b")) escape = setTimeout(() => input.feed("", true).forEach(event), 40);
+  }).once("end", stop).resume();
+  screen.send("q", { q: "hello", app: "omo.workflow", v: [1], features: ["edit"] });
+  process.stdout.write("\x1b[c\x1b[?2004h\x1b[>1u");
+}
