@@ -77,7 +77,13 @@ test("restored calls and result events share a disclosure and keep output litera
   expect(ops.at(-1)).toEqual(["set", ops[1]?.[1], { collapsed: false }]);
 });
 
-test("eval uses saved call arguments for its headline and retains literal failure output", () => {
+test.each([
+  ["malformed", [null], "print('hello');", ["\n  print('hello');\nprint('world');"]],
+  ["output-only", [{ output: "**Failed**" }], "print('hello');", ["\n  print('hello');\nprint('world');"]],
+  ["blank source", [{ code: " \n", output: "**Failed**" }], "print('hello');", ["\n  print('hello');\nprint('world');"]],
+  ["later source", [{ code: "\x1b[31m \n", output: "cell diagnostic" }, { code: "\n  print(42);" }, { code: "print(43);" }],
+    "print(42);", ["\n  print(42);", "print(43);"]],
+] as const)("restored eval keeps source and literal failure with %s cells", (_case, cells, target, sources) => {
   const ops: Op[] = [];
   const t = new Transcript((...o) => ops.push(...o));
   t.message({ role: "assistant", content: [{ type: "toolCall", id: "run", name: "eval",
@@ -86,16 +92,17 @@ test("eval uses saved call arguments for its headline and retains literal failur
   t.fold("t1", false);
   ops.length = 0;
   t.message({ role: "toolResult", toolCallId: "run", toolName: "eval", isError: true,
-    details: { cells: [null], durationMs: "invalid" }, content: [{ type: "text", text: "**Failed**" }] });
+    details: { cells, durationMs: "invalid" }, content: [{ type: "text", text: "**Failed**" }] });
   expect(ops.find(o => o[0] === "set" && o[1] === "t1")?.[2]).toMatchObject({
-    status: "error", target: "print('hello');", meta: ["js", "Failed"],
+    status: "error", target, meta: ["js", "Failed"],
   });
   t.flipTools();
   expect(ops.at(-1)).toEqual(["set", "t1", { collapsed: true }]);
-  expect(ops.find(o => o[0] === "add")?.[4]).toMatchObject({ c: expect.arrayContaining([
-    expect.objectContaining({ k: "code", p: { lang: "js", text: "\n  print('hello');\nprint('world');" } }),
+  expect(ops.find(o => o[0] === "add")?.[4]).toMatchObject({ c: [
+    expect.objectContaining({ k: "text" }),
+    ...sources.map(text => expect.objectContaining({ k: "code", p: { lang: "js", text } })),
     expect.objectContaining({ k: "code", p: { lang: "text", text: "**Failed**" } }),
-  ]) });
+  ] });
 });
 
 const todoDetails = {
