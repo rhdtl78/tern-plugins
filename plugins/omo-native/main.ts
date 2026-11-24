@@ -165,6 +165,9 @@ async function start(hello: RpcRecord) {
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
+  screen.send("s", { sf: surface, name: "omo-session-feedback", css: `
+    .sf-row[data-id="session-feedback"] { position: absolute; transform: translateY(-100%); pointer-events: none; }
+  ` });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [
     node("welcome", "card", { role: "omp.welcome" }, [

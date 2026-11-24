@@ -30,7 +30,7 @@ Open the command palette, search for `OMO`, and select **OMO: New Session**. The
 - **Enter** sends the draft. **Shift+Enter** inserts a newline. Pasting text doesn't send it.
 - During a running turn, **Cmd+Enter** steers the turn and **Ctrl+Enter** queues the draft as a follow-up. Plain **Enter** leaves the draft in place while a turn is running.
 - Click a tool card's header to expand or collapse it. **Ctrl+O** toggles the tool cards as a group.
-- Press **Escape** in the chat or click the square **Stop turn** icon to stop the current turn. Stopping preserves an unsent draft and does not cancel the session's background jobs. The spinner above the composer stays visible while the main turn or session-owned background work is running.
+- Press **Escape** in the chat or click the square **Stop turn** icon to stop the current turn. Stopping preserves an unsent draft and does not cancel the session's background jobs. Status badges and the spinner appear above the composer without moving the editor. The spinner stays visible while the main turn or session-owned background work is running.
 - Press **Ctrl+D** to close the OmO session gracefully and restore the terminal's input settings.
 
 Confirmation requests require an explicit choice. Enter doesn't approve them.
