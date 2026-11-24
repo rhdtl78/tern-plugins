@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { OmoRpc, RpcCommandError, type RpcRecord } from "./rpc";
 import { add, InputStream, node, plain, record, string, Surface, surface, type Input, type Op } from "./surface";
+import { SlashMenu } from "./slash";
 import { Editor, isStopKey, type SubmitMode } from "./editor";
 import { Transcript } from "./transcript";
 import omoIcon from "./omo-icon.svg" with { type: "text" };
@@ -20,6 +21,7 @@ const composerMode = new ComposerMode();
 let editor = draft;
 const workflowIntent = "workflow-open-intent";
 const frame = (...ops: Op[]) => screen.frame(...ops);
+const slash = new SlashMenu(frame);
 let workflowFrame: ((...ops: Op[]) => void) | undefined;
 let workflowLaunch: AbortController | undefined;
 let workflowLifetime: Promise<void> | undefined;
@@ -44,6 +46,7 @@ const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 function refresh() {
   const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
+  if (!canSend) slash.close();
   const backgroundView = background?.view;
   const { agents, jobs } = backgroundView?.running ?? { agents: 0, jobs: 0 };
   const running = [agents ? `${agents} agent${agents === 1 ? "" : "s"}` : "",
@@ -142,6 +145,7 @@ async function answer(fields: RpcRecord) {
 }
 function onRpc(e: RpcRecord) {
   if (closing) return;
+  if (e.type === "commands_changed") { slash.changed(e.sessionId, e.commands); return; }
   if (e.type === "session_closed") { fail("OmO session closed"); return; }
   void quota?.event(e);
   if (e.type === "model_changed" && Object.keys(record(e.model)).length) showModel(e.model);
@@ -352,6 +356,7 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     refresh();
     if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
     pending.forEach(onRpc);
+    void slash.bind(client);
     void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
 }
 function showModel(value: unknown) {
@@ -482,6 +487,7 @@ async function stop() {
 }
 function toggleWorkflow() {
   if (!workflowAvailable || picker || ask) return;
+  slash.close();
   if (workflowLaunch) { frame(["set", workflowIntent, { text: "" }]); workflowLaunch.abort(); return; }
   const pane = process.env.TERN_PANE, tern = Bun.which("tern");
   if (!ready || !pane || !tern) return;
@@ -531,6 +537,13 @@ function workflowInput(i: Input) {
   if (["\x1b", "\x1b[27u", "\x07", "\x1b[103;5u"].includes(i.value)) workflowLaunch?.abort();
   else workflow.key(i.value);
 }
+function insertCommand(id?: unknown) {
+  if (!ready || busy || stopping || submitting || ask || picker) return;
+  const text = slash.pick(id);
+  if (!text) return;
+  draft.replaceDraft(text);
+  frame(["focus", "draft"]); refresh();
+}
 function handle(i: Input) {
   if (closing) return;
   if (i.kind === "key" && (i.value === "\x04" || i.value === "\x1b[100;5u")) { void close(); return; }
@@ -547,8 +560,14 @@ function handle(i: Input) {
     switch (e.ev) {
       case "toggle": transcript.fold(string(e.id), e.collapsed === true); return;
       case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
-      case "send": if (e.id === "draft" && !ask) void submit("prompt", string(e.text)); return;
+      case "send":
+        if (e.id === "draft" && !ask) {
+          if (slash.choice) insertCommand();
+          else void submit("prompt", string(e.text));
+        }
+        return;
       case "action":
+        if (e.act === "insert-command" && typeof e.id === "string") { insertCommand(e.id); return; }
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
         if (e.id === "model" && e.act === "models") openPicker("models");
         if (e.id === "stop" && e.act === "stop") void stop();
@@ -563,11 +582,17 @@ function handle(i: Input) {
   if (picker) { pickerInput(picker, i); return; }
   if (i.kind === "key" && (i.value === "\x07" || i.value === "\x1b[103;5u")) { toggleWorkflow(); return; }
   if (!live || !ready) return;
-  if (i.kind === "key" && isStopKey(i.value)) { void stop(); return; }
+  if (i.kind === "key" && slash.choice) {
+    if (["\x1b[A", "\x1b[B"].includes(i.value)) { slash.move(i.value.endsWith("A") ? -1 : 1); return; }
+    if (["\r", "\x1b[13u", "\t"].includes(i.value)) { insertCommand(); return; }
+  }
+  if (i.kind === "key" && isStopKey(i.value)) { slash.close(); void stop(); return; }
   if (ask && !ask.typed) return;
   const action = editor.apply(i);
   switch (action) {
-    case "edit": refresh(); break;
+    case "edit":
+      if (editor === draft && !busy && !submitting && !stopping) slash.edit(draft.text, draft.cursor);
+      refresh(); break;
     case "prompt": case "steer": case "follow_up": void submit(action); break;
     case "fold": transcript.flipTools(); break;
     case "exit": void close(); break;
