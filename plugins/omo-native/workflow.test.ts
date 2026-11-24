@@ -153,6 +153,18 @@ test("result previews are bounded text from successful nodes, not paths or diagn
   expect(result("failed", "diagnostic")).toBeUndefined();
 });
 
+test("recognizable filesystem paths omit the whole preview regardless of prose formatting", () => {
+  const preview = (output: string) => workflowSteps([{ id: "A", state: "completed", output }])[0]?.result;
+  for (const output of ["Saved `/tmp/fixture-note.md`", "Saved **~/fixture-note.md**", "Saved “/tmp/fixture-note.md”",
+    "Saved [/tmp/fixture-note.md]", "path:/tmp/fixture-note.md", "```text\n/tmp/fixture-note.md\n```",
+    "Saved `C:\\fixture\\note.md`", "Saved `\\\\fixture\\share\\note.md`"]) {
+    expect(preview(output)).toBeUndefined();
+  }
+  for (const output of ["Saved `fixture-note.md`", "<b>safe</b> [literal](fixture-target)", "Completed 3/4 steps"]) {
+    expect(preview(output)).toBe(output);
+  }
+});
+
 test("a mismatched snapshot cannot expose terminal output from another owner or run", async () => {
   for (const [owner, runId] of [["other", "r"], ["owner", "other"]]) {
     const frames: unknown[] = [];

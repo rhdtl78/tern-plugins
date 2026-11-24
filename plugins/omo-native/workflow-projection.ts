@@ -45,8 +45,11 @@ function resultText(output: unknown) {
   if (typeof output !== "string") return;
   const clean = plain(output.replace(/\r\n?/g, "\n")).replace(/\p{Cf}/gu, "").replace(/\t/g, " ").trim();
   if (!clean) return;
-  // Do not expose filesystem locations or navigation targets embedded in task output.
-  if (/(?:\b(?:https?|file):\/\/|(?:^|[\s"'(=])(?:\/|~\/|[A-Za-z]:[\\/]))/m.test(clean)) return;
+  // Treat punctuation (including Markdown delimiters) as a path boundary.
+  // A literal closing tag is markup, not a path; don't change its displayed text.
+  const pathText = clean.replace(/<\/[A-Za-z][\w:-]*\s*>/g, " ");
+  if (/\b(?:https?|file):\/\//i.test(clean) ||
+      /(?:^|[^\p{L}\p{N}])(?:~\/|\/|[A-Za-z]:[\\/]|\\\\)/u.test(pathText)) return;
   let text = "", bytes = 0, lines = 1;
   for (const ch of clean) {
     bytes += Buffer.byteLength(ch);
