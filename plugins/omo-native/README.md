@@ -34,6 +34,13 @@ Open the command palette, search for `OMO`, and select **OMO: New Session**. The
 
 Confirmation requests require an explicit choice. Enter doesn't approve them.
 
+### View the workflow
+
+Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of the chat. You can also choose **OMO: Toggle Workflow** from the command palette when a local chat launched by the plugin has focus. The split starts closed and follows only the chat that opened it. Click **Close** or press **Escape** in the split to dismiss it without sending or clearing your draft.
+
+- **DAG** lists this session's OmO runs. Select a run to see its status and dependencies. When the pane has room, arrows connect task cards from top to bottom. Select a node from the dependency list to see its predecessors and any available failure or blocked reason. The list remains available if the pane is narrow or Tern cannot draw the graph.
+- **Plan** shows the current session's Todo. If OmO associates a `/ulw-execute` plan with this session, **Open** opens that Markdown file in a Tern tab. The link appears again when you resume the same session. There is no manual link setup.
+
 ### Choose a model
 
 When the session is idle, click the model name in the footer. Type part of a model name, provider, or model ID to filter the list. Use **↑** and **↓** to select a row. Press **Enter** or click **Use model** to apply it. You can also click a row to select it, then click the selected row to apply it.
@@ -64,6 +71,10 @@ cd "/absolute/path/to/saved-working-directory" &&
 Replace both file paths with the actual paths to the plugin entry and the saved JSONL file. The plugin rejects a relative session path or a working directory that doesn't match the saved one. A successful reopen shows the saved transcript before you send another message.
 
 ## Verification
+
+**Workflow.** Use the composer’s **Workflow** button to open one read-only split in the current tab. The DAG page shows the selected run, node states, and dependencies. It keeps the dependency list when the pane is narrow or image support is unavailable. The Plan page shows the current session’s structured Todo, including Todo restored with the transcript.
+
+Plan reads the workspace's Boulder v2 registry (`.omo/boulder.json`) for an exact match to the durable OmO session ID. A plain Todo does not create a link. A registered worktree may supply a copy under `.omo/plans/`; if that copy is absent, Plan can use the original. An unverified worktree or unsafe file path hides the link. A lost RPC connection marks the last data disconnected. Closing the chat closes the split; resume the chat to reconnect.
 
 Run `bun test ./plugins/omo-native` from the repository root. To exercise the native pickers in an isolated Tern profile:
 

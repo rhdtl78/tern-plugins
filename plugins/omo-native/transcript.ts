@@ -13,20 +13,21 @@ type ChecklistItem = {
   readonly text: string;
   readonly status: "pending" | "active" | "done";
 };
-type ChecklistPhase = {
+export type ChecklistPhase = {
   readonly id: string;
   readonly title: string;
   readonly items: readonly ChecklistItem[];
 };
 
-function todoPhases(details: unknown): readonly ChecklistPhase[] | undefined {
+export function todoPhases(details: unknown): readonly ChecklistPhase[] | undefined {
   const { phases } = record(details);
-  if (!Array.isArray(phases) || !phases.length) return;
+  if (!Array.isArray(phases)) return;
   const checklist: ChecklistPhase[] = [];
   for (const phase of phases) {
     const { name, tasks } = record(phase);
     const title = plain(string(name));
-    if (!title.trim() || !Array.isArray(tasks) || !tasks.length) return;
+    if (!title.trim() || !Array.isArray(tasks)) return;
+    if (!tasks.length) continue;
     const items: ChecklistItem[] = [];
     for (const task of tasks) {
       const { content, status } = record(task);
@@ -48,7 +49,9 @@ export class Transcript {
   #blocks = new Map<number, string>();
   #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; checklist: boolean }>();
   #folds = new Map<string, boolean>();
-  constructor(private readonly frame: (...ops: Op[]) => void) {}
+  constructor(private readonly frame: (...ops: Op[]) => void,
+    private readonly onTodo?: (phases: readonly ChecklistPhase[]) => void) {}
+  #seenTodo = new Set<string>();
   get populated() { return this.#seq !== 0; }
 
   fold(id: string, collapsed: boolean) { if (this.#folds.has(id)) this.#folds.set(id, collapsed); }
@@ -70,13 +73,17 @@ export class Transcript {
     const collapsed = kind !== "mcp" && kind !== "todo";
     const bodyId = kind === "mcp" || kind === "todo" || kind === "eval" ? `${id}.scroll` : id;
     const phases = kind === "todo" && status === "done" ? todoPhases(result?.details) : undefined;
+    if (phases && !this.#seenTodo.has(call)) {
+      this.#seenTodo.add(call);
+      this.onTodo?.(phases);
+    }
     const raw = body(result?.content);
     const evaluation = kind === "eval" ? evalCard(id, args, { status, details: result?.details, output: raw }) : undefined;
-    const output = evaluation?.body ?? (phases
+    const output = evaluation?.body ?? (phases?.length
       ? node(id + ".todo", "checklist", { mode: "full", phases })
       : node(id + ".out", "code", { lang: "text", text: raw }));
     if (!tool) {
-      this.#tools.set(call, { id, name, args, checklist: !!phases });
+      this.#tools.set(call, { id, name, args, checklist: !!phases?.length });
       this.#folds.set(id, collapsed);
       const target = plain(string(args.path) || string(args.command) || string(args.query));
       this.frame(add("main", node(id, "tool", {
@@ -91,10 +98,10 @@ export class Transcript {
       }
       this.frame(["set", id, { status }]);
       if (!result) return;
-      if (tool.checklist !== !!phases) {
+      if (tool.checklist !== !!phases?.length) {
         this.frame(["del", id + (tool.checklist ? ".todo" : ".out")], add(bodyId, output));
-        tool.checklist = !!phases;
-      } else if (phases) {
+        tool.checklist = !!phases?.length;
+      } else if (phases?.length) {
         this.frame(["set", output.id, { phases }]);
       } else {
         this.frame(["text", output.id, "replace", output.p.text]);
