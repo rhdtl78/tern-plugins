@@ -1,4 +1,5 @@
 import type { RpcRecord } from "./rpc";
+import { evalCard } from "./eval-card";
 import { add, node, plain, record, string, type Op } from "./surface";
 
 function body(content: unknown): string {
@@ -45,7 +46,7 @@ export class Transcript {
   #seq = 0;
   #assistant = "";
   #blocks = new Map<number, string>();
-  #tools = new Map<string, { readonly id: string; readonly name: string; checklist: boolean }>();
+  #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; checklist: boolean }>();
   #folds = new Map<string, boolean>();
   constructor(private readonly frame: (...ops: Op[]) => void) {}
   get populated() { return this.#seq !== 0; }
@@ -58,27 +59,40 @@ export class Transcript {
       this.frame(["set", id, { collapsed: collapse }]);
     }
   }
-  #tool(call: string, name: string, args: RpcRecord, status: string, result?: RpcRecord) {
+  #tool(call: string, name: string, input: { readonly args: RpcRecord; readonly status: string; readonly result?: RpcRecord | undefined }) {
     if (!call) return;
+    const { status, result } = input;
     const tool = this.#tools.get(call);
+    if (tool && status === "pending") return;
     const id = tool?.id ?? `t${++this.#seq}`;
-    const phases = (name || tool?.name) === "todo" && status === "done" ? todoPhases(result?.details) : undefined;
-    const output = phases
+    const kind = tool?.name || name;
+    const args = { ...tool?.args, ...input.args };
+    const collapsed = kind !== "mcp" && kind !== "todo";
+    const bodyId = kind === "mcp" || kind === "todo" || kind === "eval" ? `${id}.scroll` : id;
+    const phases = kind === "todo" && status === "done" ? todoPhases(result?.details) : undefined;
+    const raw = body(result?.content);
+    const evaluation = kind === "eval" ? evalCard(id, args, { status, details: result?.details, output: raw }) : undefined;
+    const output = evaluation?.body ?? (phases
       ? node(id + ".todo", "checklist", { mode: "full", phases })
-      : node(id + ".out", "code", { lang: "text", text: body(result?.content) });
+      : node(id + ".out", "code", { lang: "text", text: raw }));
     if (!tool) {
-      this.#tools.set(call, { id, name, checklist: !!phases });
-      this.#folds.set(id, true);
+      this.#tools.set(call, { id, name, args, checklist: !!phases });
+      this.#folds.set(id, collapsed);
       const target = plain(string(args.path) || string(args.command) || string(args.query));
       this.frame(add("main", node(id, "tool", {
         name: plain(name), title: plain(name) || "Tool", target, targetKind: args.path ? "path" : args.command ? "command" : "text",
-        collapsible: true, collapsed: true, status,
-      }, [output])));
+        collapsible: true, collapsed, status, ...evaluation?.head,
+      }, bodyId === id ? [output] : [node(bodyId, "scroll", { max: { h: "12lines" } }, [output])])));
     } else {
+      tool.args = args;
+      if (evaluation) {
+        this.frame(["set", id, { status, ...evaluation.head }], ["del", output.id], add(bodyId, output));
+        return;
+      }
       this.frame(["set", id, { status }]);
       if (!result) return;
       if (tool.checklist !== !!phases) {
-        this.frame(["del", id + (tool.checklist ? ".todo" : ".out")], add(id, output));
+        this.frame(["del", id + (tool.checklist ? ".todo" : ".out")], add(bodyId, output));
         tool.checklist = !!phases;
       } else if (phases) {
         this.frame(["set", output.id, { phases }]);
@@ -104,12 +118,12 @@ export class Transcript {
       case "assistant": {
         this.#text(body(m.content) || plain(string(m.errorMessage)), true);
         if (Array.isArray(m.content)) for (const b of m.content.map(record)) {
-          if (b.type === "toolCall") this.#tool(string(b.id), string(b.name), record(b.arguments), "pending");
+          if (b.type === "toolCall") this.#tool(string(b.id), string(b.name), { args: record(b.arguments), status: "pending" });
         }
         this.#assistant = ""; this.#blocks.clear(); break;
       }
       case "toolResult":
-        this.#tool(string(m.toolCallId), string(m.toolName), {}, m.isError ? "error" : "done", m); break;
+        this.#tool(string(m.toolCallId), string(m.toolName), { args: {}, status: m.isError ? "error" : "done", result: m }); break;
     }
   }
   event(e: RpcRecord) {
@@ -129,9 +143,11 @@ export class Transcript {
       case "tool_execution_update":
       case "tool_execution_end": {
         const result = e.partialResult ?? e.result;
-        this.#tool(string(e.toolCallId), string(e.toolName), record(e.args),
-          e.type === "tool_execution_end" ? (e.isError ? "error" : "done") : "running",
-          result ? record(result) : undefined);
+        this.#tool(string(e.toolCallId), string(e.toolName), {
+          args: record(e.args),
+          status: e.type === "tool_execution_end" ? (e.isError ? "error" : "done") : "running",
+          result: result ? record(result) : undefined,
+        });
         break;
       }
     }
