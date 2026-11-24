@@ -223,7 +223,9 @@ test("shows an owned paused run by default and retains a visible manual selectio
   let waitFor = "paused · 0/0";
   let drawn = Promise.withResolvers<string>();
   let refresh = false;
+  const frames: unknown[] = [];
   const workflow = new Workflow((...ops) => {
+    frames.push(...ops);
     const frame = JSON.stringify(ops);
     if (frame.includes(waitFor)) drawn.resolve(frame);
   });
@@ -240,18 +242,28 @@ test("shows an owned paused run by default and retains a visible manual selectio
   } }, "owner", "/tmp");
   workflow.toggle();
   const initial = await drawn.promise;
-  expect(initial).toContain('"text":"active","on":true');
-  expect(initial).not.toMatch(/Selected:|"primary"/);
-  expect(initial).not.toContain("workflow-run-foreign");
+  const picker = () => frames.findLast(op => Array.isArray(op) && op[1] === "workflow-run-picker");
+  const state = (props: RpcRecord) => ["set", "workflow-run-picker", expect.objectContaining(props)];
+  expect(picker()).toEqual(state({ value: "active", hidden: false, open: false, options: [
+    { label: "finished", value: "finished", detail: "completed" }, { label: "active", value: "active", detail: "paused" },
+  ] }));
+  expect(initial).not.toMatch(/workflow-run-(?:finished|active)|foreign/);
+  workflow.key("\x1b[A");
+  expect(picker()).toEqual(state({ value: "active", active: "finished", open: true }));
   waitFor = "completed · 0/0";
   drawn = Promise.withResolvers<string>();
-  workflow.action({ act: "select-run", id: "workflow-run-finished" });
-  expect(await drawn.promise).toContain('"text":"finished","on":true');
+  workflow.key("\r");
+  await drawn.promise;
+  expect(picker()).toEqual(state({ value: "finished", open: false }));
   refresh = true;
   waitFor = "completed · 1/1";
   drawn = Promise.withResolvers<string>();
   workflow.event(updated("owner"));
-  expect(await drawn.promise).toContain('"text":"finished","on":true');
+  await drawn.promise;
+  expect(picker()).toEqual(state({ value: "finished", open: false }));
+  workflow.key("\t");
+  expect(frames).toContainEqual(["set", "workflow-pages", { active: "plan" }]);
+  expect(picker()).toEqual(state({ hidden: true, open: false }));
 });
 
 test("attributes a skip only to failed or cancelled ancestors reachable through skipped nodes", () => {

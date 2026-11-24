@@ -28,17 +28,18 @@ tern plugin unlink omo-native
 Open the command palette, search for `OMO`, and select **OMO: New Session**. The command opens a fresh chat in a new tab. It uses the focused terminal or agent pane's working directory when available. Otherwise, Tern uses its normal new-tab directory.
 
 - **Enter** sends the draft. **Shift+Enter** inserts a newline. Pasting text doesn't send it.
+- During a running turn, **Cmd+Enter** steers the turn and **Ctrl+Enter** queues the draft as a follow-up. Plain **Enter** leaves the draft in place while a turn is running.
 - Click a tool card's header to expand or collapse it. **Ctrl+O** toggles the tool cards as a group.
-- Click **Stop** to cancel a running turn and return to the composer. Escape didn't stop the turn reliably in Tern 0.9.31. Use the button.
+- Press **Escape** in the chat or click the square **Stop turn** icon to stop the current turn. Stopping preserves an unsent draft and does not cancel the session's background jobs. The spinner above the composer stays visible while the main turn or session-owned background work is running.
 - Press **Ctrl+D** to close the OmO session gracefully and restore the terminal's input settings.
 
 Confirmation requests require an explicit choice. Enter doesn't approve them.
 
 ### View the workflow
 
-Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of the chat. You can also choose **OMO: Toggle Workflow** from the command palette when a local chat launched by the plugin has focus. The split starts closed and follows only the chat that opened it. When the window has room, Workflow targets an initial width of 420 px. Drag the divider to change its width. Click **Close** or press **Escape** in the split to dismiss it without sending or clearing your draft.
+Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of the chat. You can also choose **OMO: Toggle Workflow** from the command palette when a local chat launched by the plugin has focus. The split starts closed and follows only the chat that opened it. When the window has room, Workflow targets an initial width of 420 px. Drag the divider to change its width. Switch pages with the top **DAG** and **Plan** tabs. Use the top **×** or press **Escape** in the split to dismiss it without sending or clearing your draft.
 
-- **DAG** shows this session's run and groups each dependent node with its prerequisites. Click a card to inspect its state, attempts, measured runtime, routing, and any safe blocking reason. A successful node can show a short plain-text result. An agent's configured model does not identify which model ran. Click the selected card again or use **×** to close its details. Use **Predecessor** or **Successor** to follow an edge, or **←** and **→** to move in list order. A narrow pane or renderer without graph support shows all nodes as selectable rows.
+- **DAG** groups each dependent node with its prerequisites. If the session has multiple runs, choose one from the dropdown. Click a card to inspect its state, attempts, measured runtime, routing, and any safe blocking reason. A successful node can show a short plain-text result. An agent's configured model does not identify which model ran. Click the selected card again or use **×** to close its details. Use **Predecessor** or **Successor** to follow an edge, or **←** and **→** to move in list order. A narrow pane or renderer without graph support shows all nodes as selectable rows. The **Background activity** section lists supported session-owned agents, shell jobs, and monitors separately from the DAG.
 - **Plan** shows the current session's Todo. If OmO associates a `/ulw-execute` plan with this session, **Open** opens that Markdown file in a Tern tab. The link appears again when you resume the same session. There is no manual link setup.
 
 ### Choose a model
@@ -46,6 +47,8 @@ Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of
 When the session is idle, click the model name in the footer. Type part of a model name, provider, or model ID to filter the list. Use **↑** and **↓** to select a row. Press **Enter** or click **Use model** to apply it. You can also click a row to select it, then click the selected row to apply it.
 
 **Escape** or **Cancel** dismisses the picker without changing the model. Neither selecting a model nor cancelling sends your draft. The footer updates after OmO confirms the switch. The switch affects this session, not the device default. An engine without the `session_model_scope` capability shows an error instead.
+
+When OmO reports current subscription quota for the account this session uses, a provider ring appears beside the model. The ring shows the remaining share of the most depleted reported base window. Its tooltip gives the window and both percentages. The ring stays hidden when a matching, current report isn't available.
 
 ## Reopen a saved session
 

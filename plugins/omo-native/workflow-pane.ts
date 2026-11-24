@@ -142,6 +142,7 @@ export function workflowCompanion(path: string, token: string, chat: string, win
   let authenticated = false;
   let ready = false;
   let escape: ReturnType<typeof setTimeout>;
+  let menuOpen = false;
   const timeout = setTimeout(stop, 4000);
   function stop() {
     clearTimeout(timeout); clearTimeout(escape);
@@ -152,6 +153,7 @@ export function workflowCompanion(path: string, token: string, chat: string, win
   function event(i: Input) {
     if (i.kind === "event" && !socket && i.value.r === "hello" && i.value.v === 1) {
       screen.negotiate(i.value);
+      const cellWidth = record(i.value.cell).w;
       const graphAllowed = Array.isArray(i.value.features) && i.value.features.includes("blobs") &&
         Array.isArray(i.value.kinds) && i.value.kinds.includes("image");
       viewport = { kind: "event", value: { ev: "resize", cols: i.value.cols, cell: i.value.cell } };
@@ -188,20 +190,21 @@ export function workflowCompanion(path: string, token: string, chat: string, win
          [data-role='workflow-meta'] { color: var(--t2); font-size: .875em; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
          .sf-button[data-role^='workflow-'][aria-pressed='true'] { border-color: var(--t2); }
          [data-role='workflow-meta']:last-child::before { content: '• '; color: var(--wf-state); }
-         .sf-button[data-role='workflow-run-focus'] { text-decoration: underline; }
+         [data-id='workflow-controls'] { width: 100%; align-items: center; }
+         [data-id='workflow-run-picker'] { max-width: 100%; }
          [data-id='workflow-sizing'] { height: 0; overflow: hidden; opacity: 0; }` });
       screen.frame(add(surface, node("main", "col", {}, [
         node(marker, "col", {}, [node("workflow-sizing", "text")]),
       ])));
       const reveal = () => {
         if (!socket || socket.destroyed) return;
-        screen.frame(["del", marker], add(surface, node("dock", "col", {}, [
-          node("workflow-controls", "row", { gap: "sm", wrap: true }, [
-          node("workflow-dag", "button", { text: "DAG", actions: { click: "page" } }),
-          node("workflow-plan", "button", { text: "Plan", actions: { click: "page" } }),
-          node("workflow-close", "button", { text: "Close", actions: { click: "close" } }),
-          ]),
-        ])));
+        screen.frame(["del", marker], add("main", node("workflow-controls", "row", { gap: "sm" }, [
+          node("workflow-pages", "tabs", { aria: "Workflow pages", active: "dag", grow: 1,
+            items: [{ id: "dag", label: "DAG" }, { id: "plan", label: "Plan" }] }),
+          node("workflow-close", "button", { text: "×", aria: "Close workflow", title: "Close workflow",
+            variant: "quiet", actions: { click: "close" } }),
+        ])), add("main", node("workflow-run-picker", "select", { label: "Run", aria: "Workflow run",
+          variant: "quiet", hidden: true })));
         ready = true;
         socket.write("ready\n");
         if (viewport) socket.write(JSON.stringify(viewport) + "\n");
@@ -221,13 +224,14 @@ export function workflowCompanion(path: string, token: string, chat: string, win
           authenticated = true;
           // Sizing has its own deadline; a slow or hidden window must not close an authenticated pane.
           clearTimeout(timeout);
-          void sizeWorkflow(tern, screen, marker, token, chat, windowKey, record(i.value.cell).w, reply.daemon, reply.config).then(reveal);
+          void sizeWorkflow(tern, screen, marker, token, chat, windowKey, cellWidth, reply.daemon, reply.config).then(reveal);
           return;
         }
         const ops: unknown = JSON.parse(line);
         if (!Array.isArray(ops) || !ops.every(Array.isArray)) return;
         for (const op of ops) {
           if (op[0] !== "graph") {
+            if (op[0] === "set" && op[1] === "workflow-run-picker") menuOpen = record(op[2]).open === true;
             if (op[0] === "del" && (op[1] === "workflow-content" || op[1] === "workflow")) graphMounted = false;
             screen.frame(op); continue;
           }
@@ -283,6 +287,17 @@ export function workflowCompanion(path: string, token: string, chat: string, win
     if (i.kind === "event" && i.value.ev === "resize") viewport = i;
     if (i.kind === "event" && i.value.ev === "ack") { screen.ack(i.value.s); return; }
     if (i.kind === "event" && i.value.ev === "gone") { stop(); return; }
+    if (ready && i.kind === "event") {
+      const e = i.value;
+      if (e.id === "workflow-pages" && e.ev === "select" && (e.item === "dag" || e.item === "plan"))
+        i = { kind: "event", value: { ev: "action", id: `workflow-${e.item}`, act: "page" } };
+      else if (e.id === "workflow-run-picker" && (e.ev === "change" || e.ev === "toggle")) {
+        if (e.ev === "toggle") menuOpen = e.open === true;
+        i = { kind: "event", value: { ...e, ev: "action", act: "select-run" } };
+      }
+    }
+    if (ready && menuOpen && i.kind === "key" && (i.value === "\x1b" || i.value === "\x1b[27u"))
+      i = { kind: "event", value: { ev: "action", id: "workflow-run-picker", act: "select-run", open: false } };
     if (i.kind === "key" && ["\x1b", "\x1b[27u", "\x07", "\x1b[103;5u"].includes(i.value)) { stop(); return; }
     if (ready) socket?.write(JSON.stringify(i) + "\n");
   }

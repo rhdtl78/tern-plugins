@@ -1,5 +1,9 @@
 import { plain, type Input } from "./surface";
 
+export type SubmitMode = "prompt" | "steer" | "follow_up";
+export const isStopKey = (key: string) =>
+  key === "\x1b" || key === "\x1b[27u" || key === "\x03" || key === "\x1b[99;5u";
+
 export class Editor {
   text = "";
   cursor = 0;
@@ -8,7 +12,7 @@ export class Editor {
     this.text = this.text.slice(0, from) + text + this.text.slice(to);
     this.cursor = Math.min(this.text.length, Math.max(0, cursor));
   }
-  apply(input: Input): "submit" | "stop" | "exit" | "fold" | "edit" | undefined {
+  apply(input: Input): SubmitMode | "exit" | "fold" | "edit" | undefined {
     if (input.kind === "event") {
       const { ev, id, len, from, to, cursor, text } = input.value;
       if (ev !== "edit" || id !== "draft" || len !== this.text.length || typeof text !== "string" ||
@@ -21,9 +25,10 @@ export class Editor {
       const left = this.cursor - ([...this.text.slice(0, this.cursor)].pop()?.length ?? 0);
       const right = this.cursor + (String.fromCodePoint(this.text.codePointAt(this.cursor) ?? 0).length);
       switch (input.value) {
-        case "\r": case "\x1b[13u": return "submit";
+        case "\r": case "\x1b[13u": return "prompt";
+        case "\x1b[13;9u": return "steer";
+        case "\x1b[13;5u": case "\x1b[27;5;13~": return "follow_up";
         case "\n": case "\x1b[13;2u": case "\x1b[27;2;13~": this.#replace(this.cursor, this.cursor, "\n"); break;
-        case "\x1b": case "\x03": case "\x1b[99;5u": return "stop";
         case "\x04": case "\x1b[100;5u": return "exit";
         case "\x0f": case "\x1b[111;5u": return "fold";
         case "\x01": this.cursor = 0; break;

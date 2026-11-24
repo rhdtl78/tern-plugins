@@ -46,8 +46,21 @@ test("a native UTF-16 replacement and a stale selection never duplicate typing",
   const ev = { kind: "event", value: { ev: "edit", id: "draft", len: 4, from: 1, to: 3, text: "a", cursor: 2 } } as const;
   editor.apply(ev); editor.apply(ev);
   editor.apply({ kind: "key", value: "\x1b[13;2u" });
-  expect(editor.apply({ kind: "key", value: "\r" })).toBe("submit");
+  expect(editor.apply({ kind: "key", value: "\r" })).toBe("prompt");
   expect(editor.text).toBe("xa\ny");
+});
+
+test.each([
+  ["\x1b[13;9u", "steer"],
+  ["\x1b[13;5u", "follow_up"],
+  ["\x1b[27;5;13~", "follow_up"],
+  ["\x1b[13;13u", undefined],
+] as const)("terminal chord %j selects only its own submission mode", (bytes, action) => {
+  const stream = new InputStream(), editor = new Editor();
+  editor.reset("draft");
+  const inputs = [...bytes].flatMap(byte => stream.feed(byte));
+  expect(inputs.map(i => editor.apply(i))).toEqual([action]);
+  expect(editor.text).toBe("draft");
 });
 
 test("chunked frame bodies survive control characters, parameter-like text and split UTF-8", () => {

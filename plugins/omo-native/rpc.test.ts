@@ -26,6 +26,10 @@ for await (const line of console) {
       process.stdout.write(frame.subarray(0, split));
       process.stdout.write(frame.subarray(split));
     }
+  } else if (q.type === "get_subscription_limits" && q.sessionId === undefined && q.observe === true) {
+    output({ type: "subscription_limits", sessionId: "foreign", provider: "foreign" });
+    output({ type: "subscription_limits", provider: "chatgpt-subscription" });
+    reply(q, { data: { accounts: [] } });
   } else if (q.sessionId !== sessionId) {
     reply(q, { success: false, errorCode: "unknown_session" });
   } else if (q.type === "get_messages") {
@@ -61,6 +65,8 @@ test("routes hydration and UI replies without mixing responses or foreign events
     timeoutMs: 1500,
   });
   const events: RpcEvent[] = [];
+  const reports: unknown[] = [];
+  const unlisten = rpc.onSubscriptionLimits(event => reports.push(event.provider));
   const dialog = Promise.withResolvers<RpcEvent>();
   const unsubscribe = rpc.onEvent((event) => {
     events.push(event);
@@ -68,6 +74,8 @@ test("routes hydration and UI replies without mixing responses or foreign events
   });
   try {
     await rpc.openSession();
+    expect((await rpc.subscriptionLimits()).data).toEqual({ accounts: [] });
+    expect(reports).toEqual(["chatgpt-subscription"]);
     expect(await rpc.getMessages()).toEqual([{ role: "user", content: "persisted" }]);
     const turn = rpc.prompt("continue", { sessionId: "foreign" });
     // A failed transport also releases the event wait; no timed sleep.
@@ -82,6 +90,7 @@ test("routes hydration and UI replies without mixing responses or foreign events
     await expect(rpc.abort()).rejects.toBeInstanceOf(RpcCommandError);
   } finally {
     unsubscribe();
+    unlisten();
     await rpc.close();
   }
   expect(await rpc.exited).toEqual({ code: 0, signal: null });

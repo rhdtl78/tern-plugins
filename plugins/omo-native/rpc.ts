@@ -53,6 +53,7 @@ export class OmoRpc {
   readonly #options: OmoRpcOptions;
   readonly #pending = new Map<string, Pending>();
   readonly #listeners = new Set<(event: RpcEvent) => void>();
+  readonly #limitListeners = new Set<(event: RpcRecord) => void>();
   #buffer = "";
   #sequence = 0;
   #failure?: RpcTransportError;
@@ -95,6 +96,11 @@ export class OmoRpc {
     return () => { this.#listeners.delete(listener); };
   }
 
+  onSubscriptionLimits(listener: (event: RpcRecord) => void): () => void {
+    this.#limitListeners.add(listener);
+    return () => { this.#limitListeners.delete(listener); };
+  }
+
   openSession(fields: RpcRecord = {}): Promise<RpcSession> {
     if (this.#closing) return Promise.reject(new RpcTransportError("OmO RPC is closing"));
     return this.#opening ??= this.#open(fields);
@@ -116,6 +122,11 @@ export class OmoRpc {
   getProtocolInfo(): Promise<RpcRecord> {
     if (this.#closing) return Promise.reject(new RpcTransportError("OmO RPC is closing"));
     return this.#send({ type: "get_protocol_info" });
+  }
+
+  subscriptionLimits(): Promise<RpcRecord> {
+    if (this.#closing) return Promise.reject(new RpcTransportError("OmO RPC is closing"));
+    return this.#send({ type: "get_subscription_limits", observe: true });
   }
 
   /** Return the raw successful response envelope; throw RpcCommandError on refusal. */
@@ -240,6 +251,8 @@ export class OmoRpc {
         this.#sessionId = data.sessionId;
       }
       pending.settle(success ? record : new RpcCommandError(pending.request.type, record));
+    } else if (type === "subscription_limits" && sessionId === undefined) {
+      for (const listener of this.#limitListeners) listener(record);
     } else if (typeof type === "string" && typeof sessionId === "string" && sessionId === this.#sessionId) {
       for (const listener of this.#listeners) listener({ ...record, type, sessionId });
     }

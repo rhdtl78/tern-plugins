@@ -3,6 +3,7 @@ import { sessionPlanPath } from "./plan-link";
 import { RpcCommandError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
+import type { ActivityRow } from "./activity";
 import { displayStatus, short, unfinished, workflowSteps, type Step } from "./workflow-projection";
 
 const sheet = "workflow";
@@ -71,7 +72,7 @@ export function graph(steps: readonly Step[], dark: boolean, selected = "") {
 
 export function supportsWorkflow(hello: RpcRecord): boolean {
   const kinds = hello.kinds;
-  return Array.isArray(kinds) && ["col", "row", "text", "button", "checklist", "card", "editor"]
+  return Array.isArray(kinds) && ["col", "row", "text", "button", "checklist", "card", "editor", "select", "tabs"]
     .every(kind => kinds.includes(kind));
 }
 
@@ -94,7 +95,7 @@ export class Workflow {
   #planPath: string | undefined;
   #planRevision = 0;
   #page = "dag";
-  #keyRow = 0;
+  #menuCursor = "";
   #dark = false;
   #summary = "";
   constructor(private readonly frame: (...ops: Op[]) => void) {}
@@ -122,8 +123,29 @@ export class Workflow {
   }
 
   #clearRun() {
+    this.#menuCursor = "";
     this.#runs = []; this.#steps = [];
     this.#manualRun = this.#selected = this.#selectedStep = this.#summary = "";
+    this.background([]);
+  }
+
+  #background: readonly ActivityRow[] = [];
+
+  background(rows: readonly ActivityRow[]) {
+    if (rows.length === this.#background.length && rows.every((row, index) => {
+      const old = this.#background[index];
+      return row.id === old?.id && row.label === old.label && row.status === old.status;
+    })) return;
+    this.#background = rows;
+    if (this.#open) this.frame(["del", "workflow-background"], add(sheet, this.#activitySection()));
+  }
+
+  #activitySection() {
+    return node("workflow-background", "col", { gap: "sm", hidden: this.#page !== "dag" || !this.#background.length }, [
+      node("workflow-background-heading", "text", { spans: [{ t: "Background activity", s: "strong" }] }),
+      ...this.#background.map((row, index) => node(`workflow-background-${index}`, "text",
+        { text: `${row.label} · ${row.status}` })),
+    ]);
   }
 
   theme(dark: boolean) {
@@ -142,11 +164,13 @@ export class Workflow {
   }
 
   toggle() {
+    this.#menuCursor = "";
     this.#open = !this.#open;
     this.#revision++;
     this.#resetPlan();
     if (this.#open) {
-      this.frame(add("main", node(sheet, "col", { gap: "sm" }, this.#children())), this.#graph());
+      this.frame(add("main", node(sheet, "col", { gap: "sm" }, [...this.#children(), this.#activitySection()])),
+        ...this.#controls(), this.#graph());
       this.#dagLayout = this.#layout();
       if (this.#source) this.#invalidate();
     } else this.frame(["del", sheet]);
@@ -157,13 +181,19 @@ export class Workflow {
     if (event.act === "close" && event.value === undefined) return "close";
     if (event.act === "page" && (event.value === "dag" || event.value === "plan")) {
       this.#page = event.value;
+      this.#menuCursor = "";
       this.#resetPlan();
-      this.#keyRow = 0;
       this.#draw();
     }
-    if (event.act === "select-run" && this.#source) {
+    if (event.act === "select-run" && this.#source && this.#page === "dag") {
+      if (event.id === "workflow-run-picker" && typeof event.open === "boolean") {
+        this.#menuCursor = event.open && this.#runs.length > 1 ? this.#selected : "";
+        this.frame(...this.#controls());
+        return;
+      }
       const run = this.#runs.find(r => `workflow-run-${r.id}` === event.id || r.id === event.value);
       if (!run) return;
+      this.#menuCursor = "";
       this.#manualRun = run.id;
       if (run.id !== this.#selected) {
         this.#selected = run.id;
@@ -172,7 +202,7 @@ export class Workflow {
         this.#summary = "";
         this.#draw();
         this.#invalidate();
-      }
+      } else this.frame(...this.#controls());
     }
     if (event.act === "dismiss-step" && this.#page === "dag") {
       this.#selectedStep = "";
@@ -189,19 +219,35 @@ export class Workflow {
   }
 
   key(key: string) {
+    if (this.#page === "dag" && this.#runs.length > 1) {
+      const enter = key === "\r" || key === "\x1b[13u";
+      const dir = key === "\x1b[A" ? -1 : key === "\x1b[B" ? 1 : 0;
+      if (this.#menuCursor && enter) {
+        this.action({ act: "select-run", value: this.#menuCursor });
+        return;
+      }
+      if (dir || enter || key === " ") {
+        const at = this.#runs.findIndex(run => run.id === (this.#menuCursor || this.#selected));
+        this.#menuCursor = this.#runs[Math.max(0, Math.min(this.#runs.length - 1, at + dir))]?.id || "";
+        this.frame(...this.#controls());
+        return;
+      }
+    }
     if (key === "\t" || key === "\x1b[9u" || key === "\x1b[Z") {
       this.action({ id: sheet, act: "page", value: this.#page === "dag" ? "plan" : "dag" });
     } else if (this.#page === "dag" && (key === "\x1b[D" || key === "\x1b[C")) {
       const current = this.#steps.findIndex(s => s.id === this.#selectedStep);
       const next = current < 0 ? 0 : Math.max(0, Math.min(this.#steps.length - 1, current + (key === "\x1b[C" ? 1 : -1)));
       this.action({ id: `workflow-step-${next}`, act: "select-step" });
-    } else if (this.#page === "dag" && (key === "\x1b[A" || key === "\x1b[B")) {
-      this.#keyRow = Math.max(0, Math.min(this.#runs.length - 1, this.#keyRow + (key === "\x1b[B" ? 1 : -1)));
-      this.#draw();
-    } else if (key === "\r" || key === "\x1b[13u") {
-      const run = this.#page === "dag" ? this.#runs[this.#keyRow] : undefined;
-      if (run) this.action({ id: sheet, act: "select-run", value: run.id });
     }
+  }
+
+  #controls(): Op[] {
+    return [["set", "workflow-pages", { active: this.#page }],
+      ["set", "workflow-background", { hidden: this.#page !== "dag" || !this.#background.length }],
+      ["set", "workflow-run-picker", { value: this.#selected, open: !!this.#menuCursor, active: this.#menuCursor || this.#selected,
+        hidden: this.#page !== "dag" || this.#runs.length < 2,
+        options: this.#runs.map(run => ({ value: run.id, label: run.title, detail: displayStatus(run.status) })) }]];
   }
 
   #resetPlan() {
@@ -227,17 +273,14 @@ export class Workflow {
     const selected = this.#steps.find(s => s.id === this.#selectedStep);
     const status = this.#page === "plan" && this.#source ? "Current session Todo" : this.#status;
     return [node("workflow-content", "col", { gap: "sm" }, [
-      node("workflow-heading", "text", { spans: [{ t: title, s: "strong" }] }),
+      node("workflow-heading", "text", { spans: [{ t: title, s: "strong" }], hidden: this.#page === "dag" && this.#runs.length > 1 }),
       node("workflow-status", "text", { text: status, hidden: !status }),
       ...(this.#page === "dag" ? [node("workflow-summary", "text", { text: this.#summary, hidden: !this.#summary })] : []),
       ...(this.#page === "plan" ? [
       ...(this.#planPath ? [node("workflow-file", "button", { text: `Open ${basename(this.#planPath)}`, actions: { click: "open-file" } })] : []),
       this.#todo.length ? node("workflow-todo", "checklist", { mode: "full", phases: this.#todo })
         : node("workflow-no-todo", "text", { text: "No current Todo." }),
-    ] : [...(this.#runs.length > 1 ? this.#runs : []).map((run, index) => node(`workflow-run-${run.id}`, "button", {
-      text: run.title, on: run.id === this.#selected, variant: "quiet",
-      role: index === this.#keyRow ? "workflow-run-focus" : "workflow-run", actions: { click: "select-run" },
-    })), node("workflow-layout", "row", {}, [node("workflow-graph-anchor", "col"),
+    ] : [node("workflow-layout", "row", {}, [node("workflow-graph-anchor", "col"),
     node("workflow-fallback", "col", { gap: "sm" }, this.#steps.map((step, index) => node(`workflow-step-${index}`, "button", {
       text: `${step.label} · ${step.status}${step.needs.length ? ` · depends on ${this.#predecessors(step)}` : ""}`,
       on: step.id === this.#selectedStep, role: "workflow-step", variant: "quiet", actions: { click: "select-step" },
@@ -268,9 +311,10 @@ export class Workflow {
     // Keep the live controls mounted through a status-only snapshot update.
     if (layout && layout === this.#dagLayout) {
       const update = (n: ReturnType<typeof node>): Op[] => [["set", n.id, n.p], ...n.c.flatMap(update)];
-      this.frame(...children.flatMap(update), this.#graph());
+      this.frame(...this.#controls(), ...children.flatMap(update), this.#graph());
     } else {
-      this.frame(["del", "workflow-content"], ...children.map(child => add(sheet, child)), this.#graph());
+      this.frame(...this.#controls(), ["del", "workflow-content"],
+        ...children.map(child => ["add", child.id, sheet, "workflow-background", child]), this.#graph());
     }
     this.#dagLayout = layout;
   }
@@ -346,6 +390,7 @@ export class Workflow {
         }
       }
       this.#runs = own;
+      if (own.length < 2 || !own.some(run => run.id === this.#menuCursor)) this.#menuCursor = "";
       if (this.#selected !== selected?.id || !steps.some(s => s.id === this.#selectedStep)) this.#selectedStep = "";
       this.#selected = selected?.id ?? "";
       this.#steps = steps;
@@ -362,6 +407,7 @@ export class Workflow {
       this.#selectedStep = "";
       this.#summary = "";
       this.#runs = [];
+      this.#menuCursor = "";
       this.#draw();
     } finally {
       this.#reading = false;

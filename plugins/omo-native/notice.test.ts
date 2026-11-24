@@ -41,7 +41,8 @@ const withText = (views: Views, text: string) => visible(views).filter(view => v
 const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
-async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void) => boolean) {
+async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean,
+  scenario: "notice" | "composer" = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
     const preload = join(cwd, "tty.ts");
@@ -50,22 +51,38 @@ async function exercise(rejectOpen: boolean, observe: (views: Views, event: (val
 import { createInterface } from "node:readline";
 const sessionId = "notice-test";
 const send = value => console.log(JSON.stringify({ sessionId, ...value }));
-let prompts = 0;
+let prompts = 0, stopCalls = 0;
+const composer = ${scenario === "composer"};
 for await (const line of createInterface({ input: process.stdin })) {
-  const { id, type } = JSON.parse(line);
+  const { id, type, ...fields } = JSON.parse(line);
   if (type === "open_session" && ${rejectOpen}) {
     send({ id, type: "response", command: type, success: false, error: ${JSON.stringify(refusal)} });
     continue;
   }
+  if (composer && type === "steer") {
+    const correct = fields.message === "previous" && fields.expectedTurnId === "turn-one";
+    send({ id, type: "response", command: type, success: false, error: correct ? "fixture turn changed" : "wrong steer request" });
+    continue;
+  }
+  if (composer && type === "prompt") {
+    if (++prompts !== 1 || fields.message !== "Run fixture" ||
+        Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
+  }
+  if (composer && type === "abort" && (++stopCalls !== 1 ||
+      fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined)) process.exit(9);
   const data = type === "open_session" ? { sessionId, state: { model: { name: ${JSON.stringify(model)} } } }
-    : type === "get_messages" ? { messages: [] } : {};
+    : type === "get_messages" ? { messages: [] }
+    : type === "get_state" ? { isStreaming: true, currentTurnId: "turn-one" }
+    : type === "abort" ? { idle: !composer } : {};
   send({ id, type: "response", command: type, success: true, data });
   if (type === "get_messages") send({ type: "extension_ui_request", method: "notify",
     notifyType: "warning", message: ${JSON.stringify(warning)} });
   if (type === "prompt") {
-    if (++prompts === 2) process.exit(7);
+    if (!composer && ++prompts === 2) process.exit(7);
     send({ type: "agent_start" });
+    send({ type: "extension_ui_request", method: "notify", message: "Fixture turn started" });
   }
+  if (type === "abort" && !composer) send({ type: "agent_idle" });
 }
 `, { mode: 0o700 });
     const child = Bun.spawn([process.execPath, "--preload", preload, join(import.meta.dir, "main.ts")], {
@@ -88,7 +105,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           const { ops } = record(JSON.parse(packet));
           if (!Array.isArray(ops)) continue;
           apply(views, ops);
-          if (observe(views, event)) send("\x04");
+          if (observe(views, event, send)) send("\x04");
         }
       }
       expect(await child.exited).toBe(0);
@@ -109,7 +126,7 @@ function expectFailure(views: Views, detail: string) {
   expect(visible(views).some(view => view.kind === "toast" && string(view.props.text).includes(detail))).toBe(false);
 }
 
-test("opens, works, and stops in the composer footer and keeps engine exit in main", async () => {
+test("shows progress outside the composer and keeps engine exit in main", async () => {
   const phases = new Map<string, Views>();
   const save = (name: string, views: Views) => phases.set(name, new Map(views));
   const submit = { ev: "send", id: "draft", text: "Run fixture" };
@@ -118,7 +135,7 @@ test("opens, works, and stops in the composer footer and keeps engine exit in ma
     if (!phases.has("ready") && withText(views, warning).length) {
       save("ready", views);
       event(submit);
-    } else if (phases.has("ready") && !phases.has(working) && withText(views, working).length) {
+    } else if (phases.has("ready") && !phases.has(working) && withText(views, "Fixture turn started").length) {
       save(working, views);
       event({ ev: "action", id: "stop", act: "stop" });
     } else if (!phases.has(stopping) && withText(views, stopping).length) {
@@ -136,7 +153,11 @@ test("opens, works, and stops in the composer footer and keeps engine exit in ma
 
   for (const phase of [opening, working, stopping]) {
     const views = phases.get(phase) ?? new Map();
-    expect(withText(views, phase).map(view => `${view.parent}/${view.kind}`)).toEqual(["footer/badge"]);
+    expect(withText(views, phase).map(view => `${view.parent}/${view.kind}`))
+      .toEqual(phase === working ? [] : ["session-feedback/badge"]);
+    expect(views.get("session-activity")).toMatchObject({
+      parent: "session-feedback", kind: "spinner", props: { hidden: phase === opening },
+    });
     expect(views.get("model")?.props.hidden).not.toBe(true);
     expect(views.get("model")?.props.text).toBe(phase === opening ? "OMO" : model);
     expect(views.get("stop")?.props.hidden).toBe(phase === opening);
@@ -145,6 +166,7 @@ test("opens, works, and stops in the composer footer and keeps engine exit in ma
   expect(withText(ready, warning).map(view => `${view.parent}/${view.kind}`)).toEqual(["layer/toast"]);
   const stopped = phases.get("stopped") ?? new Map();
   expect(stopped.get("stop")?.props.hidden).toBe(true);
+  expect(stopped.get("session-activity")?.props.hidden).toBe(true);
   expect(stopped.get("draft")?.props.sendable).toBe(true);
   expect(visible(stopped).filter(view => view.parent === "footer" && view.kind === "badge")).toEqual([]);
   expectFailure(phases.get("after focus") ?? new Map(), exit);
@@ -158,4 +180,33 @@ test("keeps a refused RPC startup in a durable error card in main", async () => 
     return true;
   });
   expectFailure(failed, refusal);
+});
+
+test("rejected steer restores both drafts and repeated Escape cannot stop twice before settlement", async () => {
+  let step = 0;
+  await exercise(false, (views, event, key) => {
+    const draft = views.get("draft")?.props;
+    if (step === 0 && withText(views, warning).length) {
+      step++;
+      key("\x1b[27u"); // Idle Escape has no effect.
+      event({ ev: "send", id: "draft", text: "Run fixture", streamingBehavior: "followUp", expectedTurnId: "foreign" });
+    } else if (step === 1 && withText(views, "Fixture turn started").length) {
+      step++;
+      key("previous\r\x1b[13;9u" + "new");
+    } else if (step === 2 && hasDetail(views, "fixture turn changed")) {
+      expect(draft?.text).toBe("previous\nnew");
+      expect(draft?.sendable).toBe(false);
+      expect(views.get("stop")?.props).toMatchObject({ hidden: false, aria: "Stop turn" });
+      step++;
+      key("\x1b[27u\x1b[27u");
+    } else if (step === 3 && hasDetail(views, "The turn is still running")) {
+      if (views.get("stop")?.props.disabled !== false) return false;
+      expect(draft?.text).toBe("previous\nnew");
+      expect(draft?.sendable).toBe(false);
+      step++;
+      return true;
+    }
+    return false;
+  }, "composer");
+  expect(step).toBe(4);
 });

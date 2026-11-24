@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { OmoRpc, RpcCommandError, type RpcRecord } from "./rpc";
 import { add, InputStream, node, plain, record, string, Surface, surface, type Input, type Op } from "./surface";
-import { Editor } from "./editor";
+import { Editor, isStopKey, type SubmitMode } from "./editor";
 import { Transcript } from "./transcript";
 import { dialog } from "./dialog";
 import { resumeFields, sessionActivity } from "./session";
@@ -10,6 +10,8 @@ import { listSavedSessions } from "./history";
 import { applyModel, availableModels, Picker, savedRows, selectedSession } from "./picker";
 import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
+import { ActivityProjection } from "./activity";
+import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
 
 const screen = new Surface(), editor = new Editor(), input = new InputStream();
 const workflowIntent = "workflow-open-intent";
@@ -21,8 +23,11 @@ const workflow = new Workflow((...ops) => workflowFrame?.(...ops));
 const transcript = new Transcript(frame, phases => workflow.todo(phases));
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
+let background: ActivityProjection | undefined, quota: UsageMeter | undefined;
+let quotaAvailable = false;
 let live = false, ready = false, closing = false, busy = false, welcome = true;
-let status: "" | "Opening session…" | "Working…" | "Stopping…" = "Opening session…";
+let submitting = false, stopping = false, activity = 0;
+let status: "" | "Opening session…" | "Stopping…" = "Opening session…";
 let seq = 0, answering = false, savedDraft = "", failureShown = false;
 let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
@@ -34,12 +39,13 @@ let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
 const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 function refresh() {
-  const canSend = ready && !busy && !ask && !picker;
+  const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
   frame(["set", "draft", { text: editor.text, cursor: editor.cursor, readonly: !!picker || !ready || (!!ask && !ask.typed),
     placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
-    ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker }],
-    ["set", "session-status", { text: status, hidden: !status }]);
+    ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
+    ["set", "session-status", { text: status, hidden: !status }],
+    ["set", "session-activity", { hidden: !busy && !background?.view.active }]);
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
 function showStatus(text: typeof status) { status = text; refresh(); }
@@ -54,6 +60,8 @@ function notify(text: string, tone: "info" | "error" = "info") {
 }
 function fail(e: unknown) {
   ready = false; busy = false;
+  quota?.close(); quota = undefined;
+  background = undefined;
   unsubscribe?.(); workflow.disconnect();
   if (!workflow.open) workflowLaunch?.abort();
   removePicker();
@@ -71,6 +79,7 @@ function fail(e: unknown) {
 async function close() {
   if (closing) return;
   closing = true; clearTimeout(timer); clearTimeout(esc); unsubscribe?.();
+  quota?.close();
   workflow.disconnect();
   workflowLaunch?.abort();
   try { await Promise.all([rpc?.close(), workflowLifetime]); }
@@ -119,12 +128,19 @@ async function answer(fields: RpcRecord) {
 function onRpc(e: RpcRecord) {
   if (closing) return;
   if (e.type === "session_closed") { fail("OmO session closed"); return; }
+  void quota?.event(e);
+  if (e.type === "model_changed" && Object.keys(record(e.model)).length) showModel(e.model);
+  if (background?.observe(e)) {
+    workflow.background(background.view.rows);
+    refresh();
+  }
   workflow.event(e);
   const active = sessionActivity(e.type);
   if (active !== undefined) {
+    activity++;
     if (!active) void workflow.refreshPlan();
     if (active) removePicker();
-    if (active !== busy || active) { busy = active; showStatus(active ? "Working…" : ""); }
+    if (active !== busy || active) { busy = active; showStatus(stopping ? "Stopping…" : ""); }
     return;
   }
   switch (e.type) {
@@ -145,9 +161,11 @@ function onRpc(e: RpcRecord) {
 }
 async function start(hello: RpcRecord) {
   clearTimeout(timer); live = true; screen.negotiate(hello);
+  quotaAvailable = supportsUsage(hello);
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
+  if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [
     node("welcome", "card", { role: "omp.welcome" }, [
       node("wordmark", "text", { role: "omp.welcome.wordmark", spans: [{ t: "OMO", s: "strong" }] }),
@@ -155,16 +173,21 @@ async function start(hello: RpcRecord) {
     ]),
   ])), add(surface, node("dock", "col", {}, [
     node("dialogs", "col"),
+    node("session-feedback", "row", { align: "center", gap: "sm" }, [
+      node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
+      node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
+    ]),
     node("composer", "col", { role: "omp.editor" }, [
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
       ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
         node("model", "button", { text: "OMO", variant: "quiet", title: "Choose model", disabled: true,
-          actions: { click: "models" } }), node("gap", "row", { grow: 1 }),
+          actions: { click: "models" } }),
+        ...(quotaAvailable ? [usageNode()] : []), node("gap", "row", { grow: 1 }),
         ...(workflowAvailable ? [node("workflow-toggle", "button", { text: "Workflow", variant: "quiet",
           title: "Toggle workflow (Ctrl+G)", actions: { click: "workflow" } })] : []),
-        node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
-        node("stop", "button", { text: "Stop", actions: { click: "stop" }, hidden: true }),
+        node("stop", "button", { role: "omp.composer.stop", title: "Stop turn", aria: "Stop turn",
+          actions: { click: "stop" }, hidden: true }),
         node("send", "kbd", { keys: ["enter"], role: "omp.composer.send", title: "Send message", actions: { click: "submit" }, hidden: true }),
       ]),
     ]),
@@ -181,19 +204,36 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (!command) throw new Error("Could not find the omo executable");
     const client = rpc = new OmoRpc({ cwd, argv: [command, "--mode", "rpc", "--listen", "stdio://"],
       env: { PATH: [process.env.PATH, dirname(process.execPath)].filter(Boolean).join(":"),
-        // The installed OmO DAG bridge checks the startup capability for push.
-        ...(workflowAvailable ? { SENPI_RPC_CLIENT_CAPABILITIES: "extension_events" } : {}) },
-      capabilities: ["interactive_user","question", ...(workflowAvailable ? ["extension_events"] : [])] });
+        // Task activity also feeds the composer when Workflow is unavailable.
+        SENPI_RPC_CLIENT_CAPABILITIES: "extension_events" },
+      capabilities: ["interactive_user","question","extension_events"] });
     const pending: RpcRecord[] = [];
-    unsubscribe = client.onEvent(e => ready ? onRpc(e) : pending.push(e));
-    const { state } = await client.openSession({ auto_title: false, ...fields });
+    const events = client.onEvent(e => ready ? onRpc(e) : pending.push(e));
+    const limits = client.onSubscriptionLimits(e => { void quota?.event(e); });
+    unsubscribe = () => { events(); limits(); };
+    const { state, sessionId } = await client.openSession({ auto_title: false, ...fields });
     await verify?.();
     if (closing) return;
     const history = await client.getMessages();
     if (closing) return;
-    if (workflowAvailable) workflow.bind(client, string(state.sessionId), string(state.cwd) || cwd);
+    const owner = string(state.sessionId);
+    if (workflowAvailable) workflow.bind(client, owner, string(state.cwd) || cwd);
+    if (owner) {
+      const projection = background = new ActivityProjection(sessionId, owner);
+      projection.restore(state);
+      workflow.background(projection.view.rows);
+      const accept = projection.beginTaskList();
+      void client.request("extension_request", { name: "omo.task.list", data: { parent_session_id: owner } })
+        .then(reply => {
+          if (background === projection && !closing && accept(reply)) {
+            workflow.background(projection.view.rows);
+            refresh();
+          }
+        }, () => { /* Older hosts may not ship the OmO task extension. */ });
+    }
+    if (quotaAvailable) quota = new UsageMeter(client, renderUsage(screen));
     for (const message of history) transcript.message(message);
-    busy = state.isStreaming === true; ready = true; status = busy ? "Working…" : "";
+    busy = state.isStreaming === true; ready = true; status = "";
     showModel(state.model);
     frame(["focus", "draft"]);
     refresh();
@@ -203,6 +243,7 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
 }
 function showModel(value: unknown) {
   currentModel = record(value);
+  void quota?.setModel(value);
   frame(["set", "model", { text: plain(string(currentModel.name) || string(currentModel.id) || string(value) || "No model selected") }]);
 }
 function removePicker() {
@@ -265,33 +306,71 @@ function pickerInput(p: Picker, i: Input) {
       break;
   }
 }
-async function submit(text: string) {
-  if (ask) { if (ask.typed && text.trim()) await answer(ask.typed(text)); return; }
-  if (!ready || !rpc || busy || !text.trim()) return;
-  busy = true; editor.reset(""); showStatus("Working…");
-  try {
-    const reply = await rpc.prompt(text);
-    // A slash command may finish inside an extension without any agent_idle.
-    if (record(reply.data).disposition === "handled") {
-      void workflow.refreshPlan();
-      busy = false;
-      if (status === "Working…") status = "";
-      refresh();
-    }
+async function submit(mode: SubmitMode, supplied?: string) {
+  const text = supplied ?? editor.text;
+  if (ask) { if (mode === "prompt" && ask.typed && text.trim()) await answer(ask.typed(text)); return; }
+  if (!ready || !rpc || submitting || stopping || !text.trim()) return;
+  if (mode === "prompt" && busy) {
+    if (supplied === undefined) notify("Turn running. Use ⌘+Enter to steer or Ctrl+Enter to queue.");
+    return;
   }
-  catch (e) {
-    busy = false;
-    if (!editor.text) editor.reset(text);
-    showStatus("");
+  if (mode !== "prompt" && !busy) return;
+  const startedAt = activity, cursor = supplied === undefined ? editor.cursor : text.length;
+  submitting = true;
+  if (supplied === undefined || supplied === editor.text) editor.reset("");
+  if (mode === "prompt") { busy = true; showStatus(""); }
+  else refresh();
+  try {
+    if (mode === "prompt") {
+      const reply = await rpc.prompt(text);
+      // A slash command may finish inside an extension without any agent_idle.
+      if (record(reply.data).disposition === "handled") {
+        void workflow.refreshPlan();
+        if (startedAt === activity) { busy = false; status = ""; }
+      }
+    } else {
+      // Without a turn fence, these RPCs can queue on an idle or replacement turn.
+      const state = await rpc.getState();
+      const expectedTurnId = string(state.currentTurnId);
+      if (startedAt !== activity || !expectedTurnId || state.isStreaming !== true || stopping || closing)
+        throw new Error("The active turn changed before the message could be sent.");
+      await rpc.request(mode, { message: text, expectedTurnId });
+    }
+  } catch (e) {
+    if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; }
+    // A dialog may have taken the editor while admission was pending.
+    const newer = ask ? savedDraft : editor.text;
+    const prefix = text + (newer ? "\n" : "");
+    if (ask) savedDraft = prefix + newer;
+    else {
+      const at = editor.cursor;
+      editor.reset(prefix + newer);
+      editor.cursor = newer ? prefix.length + at : cursor;
+    }
     notify(`Prompt not sent or not acknowledged: ${why(e)}`, "error");
+  } finally {
+    submitting = false;
+    if (!closing) refresh();
   }
 }
 async function stop() {
   if (ask) return answer({ cancelled: true });
-  if (!rpc || !busy) return;
+  if (!rpc || !busy || stopping) return;
+  const startedAt = activity;
+  stopping = true;
   showStatus("Stopping…");
-  try { await rpc.abort({ awaitIdle: true }); busy = false; showStatus(""); notify("Stopped"); }
-  catch (e) { showStatus(busy ? "Working…" : ""); notify(`Stop failed: ${why(e)}`, "error"); }
+  try {
+    const reply = await rpc.abort({ intent: "stop", awaitIdle: true });
+    if (record(reply.data).idle === true) {
+      if (startedAt === activity) busy = false;
+      if (!busy) notify("Stopped");
+    } else if (busy) notify("Stop requested. The turn is still running.");
+  } catch (e) {
+    notify(`Stop failed: ${why(e)}`, "error");
+  } finally {
+    stopping = false;
+    if (!closing) showStatus("");
+  }
 }
 function toggleWorkflow() {
   if (!workflowAvailable || picker || ask) return;
@@ -366,12 +445,12 @@ function handle(i: Input) {
     switch (e.ev) {
       case "toggle": transcript.fold(string(e.id), e.collapsed === true); return;
       case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
-      case "send": if (e.id === "draft" && !ask) void submit(string(e.text)); return;
+      case "send": if (e.id === "draft" && !ask) void submit("prompt", string(e.text)); return;
       case "action":
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
         if (e.id === "model" && e.act === "models") openPicker("models");
         if (e.id === "stop" && e.act === "stop") void stop();
-        if (e.id === "send" && e.act === "submit") void submit(editor.text);
+        if (e.id === "send" && e.act === "submit") void submit("prompt");
         if (ask && e.act === "choose") {
           const choice = ask.choices.find((_, n) => e.id === `${ask?.id}.${n}`);
           if (choice) void answer(choice.fields);
@@ -381,15 +460,13 @@ function handle(i: Input) {
   }
   if (picker) { pickerInput(picker, i); return; }
   if (i.kind === "key" && (i.value === "\x07" || i.value === "\x1b[103;5u")) { toggleWorkflow(); return; }
-  if (!live || !ready || (ask && !ask.typed && i.kind !== "key")) return;
-  if (ask && !ask.typed) {
-    if (i.value === "\x1b" || i.value === "\x03") void stop();
-    return;
-  }
-  switch (editor.apply(i)) {
+  if (!live || !ready) return;
+  if (i.kind === "key" && isStopKey(i.value)) { void stop(); return; }
+  if (ask && !ask.typed) return;
+  const action = editor.apply(i);
+  switch (action) {
     case "edit": refresh(); break;
-    case "submit": void submit(editor.text); break;
-    case "stop": void stop(); break;
+    case "prompt": case "steer": case "follow_up": void submit(action); break;
     case "fold": transcript.flipTools(); break;
     case "exit": void close(); break;
   }
