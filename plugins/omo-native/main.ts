@@ -13,8 +13,10 @@ import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
+import { ComposerMode } from "./composer-mode";
 
 const screen = new Surface(), draft = new Editor(), input = new InputStream();
+const composerMode = new ComposerMode();
 let editor = draft;
 const workflowIntent = "workflow-open-intent";
 const frame = (...ops: Op[]) => screen.frame(...ops);
@@ -46,8 +48,13 @@ function refresh() {
   const { agents, jobs } = backgroundView?.running ?? { agents: 0, jobs: 0 };
   const running = [agents ? `${agents} agent${agents === 1 ? "" : "s"}` : "",
     jobs ? `${jobs} job${jobs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  const border = ready ? composerMode.border(!ask && !picker ? draft.text : undefined) : undefined;
   frame(["set", "draft", { text: editor.text, cursor: editor.cursor, readonly: !!picker || !ready || (!!ask && !ask.typed),
-    placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend }],
+    placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend,
+    aria: ask?.typed ? "Type your answer" : border === "ulw-running" ? "Message OMO · ULW running"
+      : border === "ulw-preview" ? "Message OMO · ULW preview"
+      : border === "research-preview" ? "Message OMO · Research preview" : "Message OMO" }],
+    ["set", "composer-mode", { role: border ?? "normal" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
     ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
@@ -67,6 +74,7 @@ function notify(text: string, tone: "info" | "error" = "info") {
 }
 function fail(e: unknown) {
   ready = false; busy = false;
+  composerMode.clear();
   quota?.close(); quota = undefined;
   background = undefined;
   unsubscribe?.(); workflow.disconnect();
@@ -142,6 +150,7 @@ function onRpc(e: RpcRecord) {
     refresh();
   }
   workflow.event(e);
+  composerMode.observe(e);
   const active = sessionActivity(e.type);
   if (active !== undefined) {
     activity++;
@@ -182,8 +191,12 @@ async function start(hello: RpcRecord) {
   transcript = new Transcript(frame, phases => workflow.todo(phases), authorIcon);
   screen.send("s", { sf: surface, name: "omo-composer", css: `
     .sf-col[data-id="composer"][data-role="omp.editor"] {
+      --omo-composer-edge: 1px;
+      --omo-mode-teal: light-dark(#007d71, #31c4ae);
+      --omo-mode-violet: light-dark(#7751a6, #b597e0);
+      --omo-mode-research: light-dark(#356ca6, #83ace0);
       background: var(--raise);
-      border: 1px solid var(--l3);
+      border: var(--omo-composer-edge) solid var(--l3);
       border-radius: 22px;
       box-shadow: none;
       gap: 4px;
@@ -193,6 +206,23 @@ async function start(hello: RpcRecord) {
     .sf-col[data-id="composer"][data-role="omp.editor"]::after { display: none; }
     .sf-col[data-id="composer"][data-role="omp.editor"]:focus-within {
       border-color: var(--accent);
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-preview"]),
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-running"]) {
+      --omo-mode-start: var(--omo-mode-teal);
+      --omo-mode-end: var(--omo-mode-violet);
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="research-preview"]) {
+      --omo-mode-start: var(--omo-mode-research);
+      --omo-mode-end: var(--omo-mode-research);
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"]:not([data-role="normal"])) {
+      border-color: transparent;
+      background: linear-gradient(var(--raise), var(--raise)) padding-box,
+        linear-gradient(to right, var(--omo-mode-start), var(--omo-mode-end)) border-box;
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-running"]) {
+      box-shadow: inset 0 0 0 var(--omo-composer-edge) var(--omo-mode-teal);
     }
     .sf-col[data-id="composer"] > .sf-row[data-id="session-feedback"] {
       position: absolute;
@@ -254,6 +284,7 @@ async function start(hello: RpcRecord) {
   ])), add(surface, node("dock", "col", {}, [
     node("dialogs", "col"),
     node("composer", "col", { role: "omp.editor" }, [
+      node("composer-mode", "text", { role: "normal", hidden: true }),
       node("session-feedback", "row", { align: "center", gap: "sm" }, [
         node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
         node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
@@ -408,7 +439,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
       // A slash command may finish inside an extension without any agent_idle.
       if (record(reply.data).disposition === "handled") {
         void workflow.refreshPlan();
-        if (startedAt === activity) { busy = false; status = ""; }
+        if (startedAt === activity) { busy = false; status = ""; composerMode.clear(); }
       }
     } else {
       // Without a turn fence, these RPCs can queue on an idle or replacement turn.
@@ -419,7 +450,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
       await rpc.request(mode, { message: text, expectedTurnId });
     }
   } catch (e) {
-    if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; }
+    if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; composerMode.clear(); }
     // A dialog may have taken the editor while admission was pending.
     const newer = draft.text;
     const prefix = text + (newer ? "\n" : "");
@@ -439,7 +470,7 @@ async function stop() {
   try {
     const reply = await rpc.abort({ intent: "stop", awaitIdle: true });
     if (record(reply.data).idle === true) {
-      if (startedAt === activity) busy = false;
+      if (startedAt === activity) { busy = false; composerMode.clear(); }
       if (!busy) notify("Stopped");
     } else if (busy) notify("Stop requested. The turn is still running.");
   } catch (e) {
