@@ -141,11 +141,11 @@ test.each(["live", "restored"] as const)("%s Todo displays all phases and status
   expect(ops).toContainEqual(["del", "t1.out"]);
   expect(ops.find(o => o[0] === "add" && o[2] === "t1.scroll")?.[4]).toMatchObject({
     k: "checklist", p: { mode: "full", phases: [
-      { title: "Validation", items: [
+      { title: "Validation", collapsed: false, items: [
         { text: "Check input", status: "done" },
         { text: "Review output", status: "active" },
       ] },
-      { title: "Release", items: [{ text: "Publish report", status: "pending" }] },
+      { title: "Release", collapsed: false, items: [{ text: "Publish report", status: "pending" }] },
     ] },
   });
   t.flipTools();

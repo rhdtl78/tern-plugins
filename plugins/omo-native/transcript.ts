@@ -16,6 +16,7 @@ type ChecklistItem = {
 export type ChecklistPhase = {
   readonly id: string;
   readonly title: string;
+  readonly collapsed: false;
   readonly items: readonly ChecklistItem[];
 };
 
@@ -37,7 +38,8 @@ export function todoPhases(details: unknown): readonly ChecklistPhase[] | undefi
       if (!text.trim() || !state) return;
       items.push({ id: `${checklist.length}:${items.length}`, text, status: state });
     }
-    checklist.push({ id: String(checklist.length), title, items });
+    // Tern otherwise folds completed phases. A manual fold takes precedence by phase ID.
+    checklist.push({ id: String(checklist.length), title, collapsed: false, items });
   }
   return checklist;
 }
