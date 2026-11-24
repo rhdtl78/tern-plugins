@@ -13,7 +13,8 @@ import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
 
-const screen = new Surface(), editor = new Editor(), input = new InputStream();
+const screen = new Surface(), draft = new Editor(), input = new InputStream();
+let editor = draft;
 const workflowIntent = "workflow-open-intent";
 const frame = (...ops: Op[]) => screen.frame(...ops);
 let workflowFrame: ((...ops: Op[]) => void) | undefined;
@@ -28,7 +29,7 @@ let quotaAvailable = false;
 let live = false, ready = false, closing = false, busy = false, welcome = true;
 let submitting = false, stopping = false, activity = 0;
 let status: "" | "Opening session…" | "Stopping…" = "Opening session…";
-let seq = 0, answering = false, savedDraft = "", failureShown = false;
+let seq = 0, answering = false, failureShown = false;
 let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
 let workflowAvailable = false;
@@ -99,7 +100,7 @@ function nextDialog() {
   removePicker();
   waiting.delete(id);
   ask = dialog(req, ++seq);
-  savedDraft = editor.text; editor.reset("");
+  editor = new Editor();
   if (!ask.supported) {
     notify(`Cannot display ${string(req.method)} in this surface; cancelling.`, "error");
     void answer({ cancelled: true }); return;
@@ -111,7 +112,7 @@ function dismiss(id: string) {
   if (ask?.requestId !== id) return;
   if (ask.supported) frame(["del", ask.id]);
   ask = undefined; answering = false;
-  editor.reset(savedDraft); frame(["focus", "draft"]); nextDialog(); refresh();
+  editor = draft; frame(["focus", "draft"]); nextDialog(); refresh();
 }
 async function answer(fields: RpcRecord) {
   if (!ask || answering || !rpc) return;
@@ -165,8 +166,64 @@ async function start(hello: RpcRecord) {
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
-  screen.send("s", { sf: surface, name: "omo-session-feedback", css: `
-    .sf-row[data-id="session-feedback"] { position: absolute; transform: translateY(-100%); pointer-events: none; }
+  screen.send("s", { sf: surface, name: "omo-composer", css: `
+    .sf-col[data-id="composer"][data-role="omp.editor"] {
+      background: var(--raise);
+      border: 1px solid var(--l3);
+      border-radius: 22px;
+      box-shadow: none;
+      gap: 4px;
+      padding: 8px 10px;
+    }
+    .sf-col[data-id="composer"][data-role="omp.editor"]::before,
+    .sf-col[data-id="composer"][data-role="omp.editor"]::after { display: none; }
+    .sf-col[data-id="composer"][data-role="omp.editor"]:focus-within {
+      border-color: var(--accent);
+    }
+    .sf-col[data-id="composer"] > .sf-row[data-id="session-feedback"] {
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      pointer-events: none;
+    }
+    .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="line"] {
+      min-height: 0;
+      padding: 0 4px;
+    }
+    .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="line"] > .sf-editor[data-id="draft"] {
+      min-height: 0;
+    }
+    .sf-col[data-id="composer"] .sf-editor[data-id="draft"] .sf-ed-ph { color: var(--t2); }
+    .sf-col[data-id="composer"] > .sf-row[data-id="footer"] { gap: 4px; }
+    .sf-row[data-id="footer"] > .sf-button[data-id="model"] {
+      border: 1px solid var(--l3);
+      border-radius: 999px;
+      min-width: 0;
+    }
+    .sf-row[data-id="footer"] > .sf-button[data-id="model"] .sf-btn-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sf-row[data-id="footer"] > .sf-button:is([data-id="send"], [data-id="stop"]) {
+      background: var(--t1);
+      color: var(--raise);
+      border: none;
+      border-radius: 50%;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      flex: 0 0 28px;
+      order: 1;
+    }
+    .sf-row[data-id="footer"] > .sf-button[data-id="stop"]:hover {
+      background: var(--t2);
+    }
+    .sf-row[data-id="footer"] > .sf-button[data-id="send"] {
+      background: var(--accent-fill);
+      color: #fff;
+    }
+    .sf-row[data-id="footer"] > .sf-button[data-id="send"]:hover { opacity: .9; }
   ` });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [
@@ -176,11 +233,11 @@ async function start(hello: RpcRecord) {
     ]),
   ])), add(surface, node("dock", "col", {}, [
     node("dialogs", "col"),
-    node("session-feedback", "row", { align: "center", gap: "sm" }, [
-      node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
-      node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
-    ]),
     node("composer", "col", { role: "omp.editor" }, [
+      node("session-feedback", "row", { align: "center", gap: "sm" }, [
+        node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
+        node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
+      ]),
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
       ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
@@ -191,7 +248,8 @@ async function start(hello: RpcRecord) {
           title: "Toggle workflow (Ctrl+G)", actions: { click: "workflow" } })] : []),
         node("stop", "button", { role: "omp.composer.stop", title: "Stop turn", aria: "Stop turn",
           actions: { click: "stop" }, hidden: true }),
-        node("send", "kbd", { keys: ["enter"], role: "omp.composer.send", title: "Send message", actions: { click: "submit" }, hidden: true }),
+        node("send", "button", { icon: "arrow-up", title: "Send message (Enter)", aria: "Send message",
+          actions: { click: "submit" }, hidden: true }),
       ]),
     ]),
   ])), add(surface, node("layer", "col", {}, [node(workflowIntent, "text", { hidden: true })])),
@@ -342,14 +400,9 @@ async function submit(mode: SubmitMode, supplied?: string) {
   } catch (e) {
     if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; }
     // A dialog may have taken the editor while admission was pending.
-    const newer = ask ? savedDraft : editor.text;
+    const newer = draft.text;
     const prefix = text + (newer ? "\n" : "");
-    if (ask) savedDraft = prefix + newer;
-    else {
-      const at = editor.cursor;
-      editor.reset(prefix + newer);
-      editor.cursor = newer ? prefix.length + at : cursor;
-    }
+    draft.reset(prefix + newer, newer ? prefix.length + draft.cursor : cursor);
     notify(`Prompt not sent or not acknowledged: ${why(e)}`, "error");
   } finally {
     submitting = false;
@@ -485,7 +538,7 @@ if (args[0] === "--workflow-pane" && args.length === 6 && args[1] && /^[a-f0-9]{
   }).once("end", close).resume();
   for (const signal of ["SIGINT","SIGHUP","SIGTERM"] as const) process.once(signal, close);
   process.stdout.on("error", close);
-  screen.send("q", { q: "hello", app: "omo", v: [1], features: ["edit","send"] });
+  screen.send("q", { q: "hello", app: "omo", v: [1], features: ["edit","send","undo"] });
   process.stdout.write("\x1b[c\x1b[?2004h\x1b[>1u");
   timer = setTimeout(() => {
     process.stderr.write("OMO Native: Tern did not negotiate a surface. Enable Native program surfaces and reopen this pane.\r\n");
