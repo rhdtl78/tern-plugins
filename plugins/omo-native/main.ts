@@ -139,7 +139,7 @@ function onRpc(e: RpcRecord) {
   const active = sessionActivity(e.type);
   if (active !== undefined) {
     activity++;
-    if (!active) void workflow.refreshPlan();
+    if (!active) { void workflow.refreshPlan(); void workflow.refreshUsage(); }
     if (active) removePicker();
     if (active !== busy || active) { busy = active; showStatus(stopping ? "Stopping…" : ""); }
     return;
@@ -460,10 +460,6 @@ function workflowInput(i: Input) {
   if (i.kind === "event" && i.value.ev === "action") {
     const { id, act } = i.value;
     if (id === "workflow-close" && act === "close") { workflowLaunch?.abort(); return; }
-    if ((id === "workflow-dag" || id === "workflow-plan") && act === "page") {
-      workflow.action({ id: "workflow", act: "page", value: id === "workflow-plan" ? "plan" : "dag" });
-      return;
-    }
     if (id === "workflow-file" && act === "open-file" && !ask && !picker) {
       const launch = workflowLaunch;
       const tern = Bun.which("tern"), pane = process.env.TERN_PANE;
@@ -476,8 +472,6 @@ function workflowInput(i: Input) {
       });
       return;
     }
-  }
-  if (i.kind === "event" && i.value.ev === "action" && (i.value.act === "select-run" || i.value.act === "select-step" || i.value.act === "dismiss-step")) {
     workflow.action(i.value);
     return;
   }

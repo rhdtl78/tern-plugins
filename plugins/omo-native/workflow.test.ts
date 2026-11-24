@@ -7,7 +7,7 @@ import { Transcript } from "./transcript";
 import { graph, supportsWorkflow, Workflow } from "./workflow";
 import { sessionPlanPath } from "./plan-link";
 import { record } from "./surface";
-import { workflowSteps } from "./workflow-projection";
+import { workflowLayers, workflowSteps } from "./workflow-projection";
 
 test("vertical DAG keeps a direct edge around the intermediate node", () => {
   const steps = [
@@ -261,9 +261,46 @@ test("shows an owned paused run by default and retains a visible manual selectio
   workflow.event(updated("owner"));
   await drawn.promise;
   expect(picker()).toEqual(state({ value: "finished", open: false }));
-  workflow.key("\t");
-  expect(frames).toContainEqual(["set", "workflow-pages", { active: "plan" }]);
+  workflow.action({ act: "fold", id: "workflow-plan" });
+  expect(frames).toContainEqual(["set", "workflow-plan-body", expect.objectContaining({ hidden: true })]);
+  expect(picker()).toEqual(state({ hidden: false }));
+  workflow.action({ act: "fold", id: "workflow-dag" });
   expect(picker()).toEqual(state({ hidden: true, open: false }));
+  workflow.event(updated("owner"));
+  await Bun.sleep(0);
+  expect(picker()).toEqual(state({ hidden: true, open: false }));
+});
+
+test("groups a reverse-order 67-node chain without inventing layers for missing or cyclic dependencies", () => {
+  const rows = Array.from({length: 67}, (_, i) => ({ id: `${i}`, label: `계획 검증 ${i}`, dependsOn: i ? [`${i-1}`] : [] })).reverse();
+  const steps = workflowSteps(rows);
+  expect(graph(steps, false)).toBeUndefined();
+  expect(workflowLayers(steps)).toEqual(Array.from({length: 67}, (_, i) => [66-i]));
+  expect(workflowLayers(workflowSteps([{ id: "x", dependsOn: ["absent"] }]))).toBeUndefined();
+  expect(workflowLayers(workflowSteps([{ id: "x", dependsOn: ["x"] }]))).toBeUndefined();
+});
+
+test("usage ignores a stale reading and clears a foreign reading instead of carrying old totals", async () => {
+  const frames: unknown[] = [];
+  const workflow = new Workflow((...ops) => frames.push(...ops));
+  const replies: ReturnType<typeof Promise.withResolvers<RpcRecord>>[] = [];
+  workflow.bind({ sessionId: "route", async request(type) {
+    if (type !== "get_session_stats") return listed();
+    const deferred = Promise.withResolvers<RpcRecord>();
+    replies.push(deferred); return deferred.promise;
+  } }, "owner", "/tmp");
+  workflow.toggle();
+  const refresh = workflow.refreshUsage();
+  const stats = (sessionId: string, total: number) => ({ sessionId: "route", data: { sessionId, tokens: { total } } });
+  replies[1].resolve(stats("owner", 140)); await refresh;
+  expect(frames).toContainEqual(["set", "workflow-usage-body", { text: "140 tokens", hidden: false }]);
+  frames.length = 0;
+  replies[0].resolve(stats("owner", 888)); await Bun.sleep(0);
+  expect(JSON.stringify(frames)).not.toContain("888 tokens");
+  const wrong = workflow.refreshUsage();
+  replies[2].resolve(stats("neighbor", 999)); await wrong;
+  expect(frames).toContainEqual(["set", "workflow-usage-body", { text: "", hidden: true }]);
+  expect(JSON.stringify(frames)).not.toContain("999 tokens");
 });
 
 test("attributes a skip only to failed or cancelled ancestors reachable through skipped nodes", () => {

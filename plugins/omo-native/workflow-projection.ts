@@ -20,6 +20,31 @@ export const unfinished = (status: string) => unfinishedStates.has(status);
 export const displayStatus = (status: string) => states.has(status) ? status : "unknown";
 export const short = (value: unknown) => plain(string(value)).replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, 80);
 
+/** Return complete dependency layers only; cycles and missing parents have no valid layering. */
+export function workflowLayers(steps: readonly Step[]) {
+  const children = new Map<string, number[]>(), pending = steps.map(s => s.needs.length);
+  let level: number[] = [];
+  steps.forEach((s, i) => {
+    if (!s.needs.length) level.push(i);
+    for (const parent of s.needs) {
+      const row = children.get(parent);
+      if (row) row.push(i); else children.set(parent, [i]);
+    }
+  });
+  const layers: number[][] = [];
+  let visited = 0;
+  while (level.length) {
+    layers.push(level);
+    visited += level.length;
+    const next: number[] = [];
+    for (const i of level) for (const j of children.get(steps[i].id) ?? []) {
+      if (--pending[j] === 0) next.push(j);
+    }
+    level = next;
+  }
+  return visited === steps.length ? layers : undefined;
+}
+
 const failureReason = (error: unknown) => {
   const { code } = record(error);
   if (code === "start_failed") return "The node could not start (start_failed).";

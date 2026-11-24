@@ -4,39 +4,29 @@ import { RpcCommandError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
 import type { ActivityRow } from "./activity";
-import { displayStatus, short, unfinished, workflowSteps, type Step } from "./workflow-projection";
+import { displayStatus, short, unfinished, workflowLayers, workflowSteps, type Step } from "./workflow-projection";
 
 const sheet = "workflow";
 export const workflowGraphMinWidth = 380;
 type Run = { readonly id: string; readonly title: string; readonly status: string };
+type Section = "usage" | "plan" | "dag" | "agents" | "jobs";
+type Reader = Pick<OmoRpc, "request"> & Partial<Pick<OmoRpc, "sessionId">>;
 const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
   s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
 
 export function graph(steps: readonly Step[], dark: boolean, selected = "") {
   if (!steps.length || steps.length > 12 || steps.reduce((n, s) => n + s.needs.length, 0) > 24) return;
-  const levels = new Map<string, number>();
-  for (let i = 0; i < steps.length; i++) {
-    for (const step of steps) {
-      if (!levels.has(step.id) && step.needs.every(id => levels.has(id))) {
-        levels.set(step.id, Math.max(0, ...step.needs.map(id => (levels.get(id) ?? 0) + 1)));
-      }
-    }
-  }
-  if (levels.size !== steps.length) return;
-  const rows = new Map<number, Step[]>();
-  for (const step of steps) {
-    const depth = levels.get(step.id) ?? 0;
-    const row = rows.get(depth) ?? [];
-    row.push(step);
-    rows.set(depth, row);
-  }
+  const layers = workflowLayers(steps);
+  if (!layers) return;
+  const rows = layers.map(indices => indices.map(i => steps[i]));
+  const levels = new Map(rows.flatMap((row, depth) => row.map(s => [s.id, depth] as const)));
   const routeCount = steps.reduce((n, s) => n + s.needs.filter(id =>
     (levels.get(s.id) ?? 0) - (levels.get(id) ?? 0) > 1).length, 0);
-  if (rows.size > 7 || routeCount > 5 || [...rows.values()].some(row => row.length > 3)) return;
+  if (rows.length > 7 || routeCount > 5 || rows.some(row => row.length > 3)) return;
   const width = 480, cardHeight = 78, stride = cardHeight + 32, gutter = 30 + routeCount * 5;
-  const height = 22 + (rows.size - 1) * stride + cardHeight;
+  const height = 22 + (rows.length - 1) * stride + cardHeight;
   const points = new Map<string, readonly [number, number, number]>();
-  for (const [depth, row] of rows) {
+  for (const [depth, row] of rows.entries()) {
     const available = width - gutter * 2, slot = available / row.length;
     row.forEach((step, i) => points.set(step.id, [gutter + (i + 0.5) * slot, 11 + depth * stride, Math.min(235, slot - 10)]));
   }
@@ -72,13 +62,13 @@ export function graph(steps: readonly Step[], dark: boolean, selected = "") {
 
 export function supportsWorkflow(hello: RpcRecord): boolean {
   const kinds = hello.kinds;
-  return Array.isArray(kinds) && ["col", "row", "text", "button", "checklist", "card", "editor", "select", "tabs"]
+  return Array.isArray(kinds) && ["col", "row", "text", "button", "checklist", "card", "editor", "select"]
     .every(kind => kinds.includes(kind));
 }
 
 /** One instance per chat, with no shared cache or command transport. */
 export class Workflow {
-  #source: Pick<OmoRpc, "request"> | undefined;
+  #source: Reader | undefined;
   #owner = "";
   #cwd = "";
   #open = false;
@@ -94,7 +84,9 @@ export class Workflow {
   #todo: readonly ChecklistPhase[] = [];
   #planPath: string | undefined;
   #planRevision = 0;
-  #page = "dag";
+  #expanded = { usage: true, plan: true, dag: true, agents: true, jobs: true };
+  #usage = "";
+  #usageRevision = 0;
   #menuCursor = "";
   #dark = false;
   #summary = "";
@@ -102,19 +94,21 @@ export class Workflow {
 
   get open() { return this.#open; }
 
-  bind(source: Pick<OmoRpc, "request">, owner: string, cwd: string) {
+  bind(source: Reader, owner: string, cwd: string) {
     if (!owner || !cwd) return;
+    if (this.#owner !== owner) this.#todo = [];
     this.#clearRun();
     this.#source = source;
     this.#owner = owner;
     this.#cwd = cwd;
     this.#status = "Loading workflow…";
     this.#resetPlan();
-    if (this.#open) this.#invalidate();
+    if (this.#open) { this.#draw(); this.#invalidate(); void this.refreshUsage(); }
   }
 
   disconnect() {
     this.#source = undefined;
+    this.#todo = [];
     this.#clearRun();
     this.#revision++;
     this.#resetPlan();
@@ -123,10 +117,12 @@ export class Workflow {
   }
 
   #clearRun() {
+    this.#usageRevision++;
+    this.#usage = "";
     this.#menuCursor = "";
     this.#runs = []; this.#steps = [];
     this.#manualRun = this.#selected = this.#selectedStep = this.#summary = "";
-    this.background([]);
+    this.#background = [];
   }
 
   #background: readonly ActivityRow[] = [];
@@ -137,14 +133,16 @@ export class Workflow {
       return row.id === old?.id && row.label === old.label && row.status === old.status;
     })) return;
     this.#background = rows;
-    if (this.#open) this.frame(["del", "workflow-background"], add(sheet, this.#activitySection()));
+    if (this.#open) this.#draw();
   }
 
-  #activitySection() {
-    return node("workflow-background", "col", { gap: "sm", hidden: this.#page !== "dag" || !this.#background.length }, [
-      node("workflow-background-heading", "text", { spans: [{ t: "Background activity", s: "strong" }] }),
-      ...this.#background.map((row, index) => node(`workflow-background-${index}`, "text",
-        { text: `${row.label} · ${row.status}` })),
+  #bar(section: Section, label: string, count = "", hidden = false) {
+    const open = this.#expanded[section];
+    return node(`workflow-${section}-bar`, "row", { role: "workflow-bar", gap: "sm", hidden }, [
+      node(`workflow-${section}`, "button", { text: `${open ? "▾" : "▸"}  ${label}`, aria: `${open ? "Collapse" : "Expand"} ${label}`,
+        role: "workflow-fold", variant: "quiet", on: open, actions: { click: "fold" } }),
+      node(`workflow-${section}-count`, "text", { text: count, hidden: !count }),
+      ...(section === "dag" ? [node("workflow-run-picker", "select", { aria: "Workflow run", variant: "quiet", hidden: true })] : []),
     ]);
   }
 
@@ -154,7 +152,7 @@ export class Workflow {
 
   todo(phases: readonly ChecklistPhase[]) {
     this.#todo = phases;
-    if (this.#page === "plan") this.#draw();
+    this.#draw();
   }
 
   event(event: RpcRecord) {
@@ -164,28 +162,32 @@ export class Workflow {
   }
 
   toggle() {
+    this.#usageRevision++;
     this.#menuCursor = "";
     this.#open = !this.#open;
     this.#revision++;
     this.#resetPlan();
     if (this.#open) {
-      this.frame(add("main", node(sheet, "col", { gap: "sm" }, [...this.#children(), this.#activitySection()])),
+      this.frame(add("main", node(sheet, "col", { gap: "sm" }, this.#children())),
         ...this.#controls(), this.#graph());
       this.#dagLayout = this.#layout();
-      if (this.#source) this.#invalidate();
+      if (this.#source) { this.#invalidate(); void this.refreshUsage(); }
     } else this.frame(["del", sheet]);
   }
 
   action(event: RpcRecord): "close" | undefined {
     if (!this.#open) return;
     if (event.act === "close" && event.value === undefined) return "close";
-    if (event.act === "page" && (event.value === "dag" || event.value === "plan")) {
-      this.#page = event.value;
-      this.#menuCursor = "";
-      this.#resetPlan();
-      this.#draw();
+    if (event.act === "fold") {
+      for (const section of ["usage", "plan", "dag", "agents", "jobs"] as const) {
+        if (event.id !== `workflow-${section}`) continue;
+        this.#expanded[section] = !this.#expanded[section];
+        if (section === "dag") this.#menuCursor = "";
+        if (section === "plan" && this.#expanded.plan) void this.refreshPlan();
+        this.#draw();
+      }
     }
-    if (event.act === "select-run" && this.#source && this.#page === "dag") {
+    if (event.act === "select-run" && this.#source && this.#expanded.dag) {
       if (event.id === "workflow-run-picker" && typeof event.open === "boolean") {
         this.#menuCursor = event.open && this.#runs.length > 1 ? this.#selected : "";
         this.frame(...this.#controls());
@@ -204,11 +206,11 @@ export class Workflow {
         this.#invalidate();
       } else this.frame(...this.#controls());
     }
-    if (event.act === "dismiss-step" && this.#page === "dag") {
+    if (event.act === "dismiss-step" && this.#expanded.dag) {
       this.#selectedStep = "";
       this.#draw();
     }
-    if (event.act === "select-step" && this.#page === "dag") {
+    if (event.act === "select-step" && this.#expanded.dag) {
       const step = this.#steps.find((_, index) => event.id === `workflow-step-${index}` || event.id === `workflow-card-${index}` ||
         event.id === `workflow-neighbor-${index}`);
       if (step) {
@@ -219,7 +221,7 @@ export class Workflow {
   }
 
   key(key: string) {
-    if (this.#page === "dag" && this.#runs.length > 1) {
+    if (this.#expanded.dag && this.#runs.length > 1) {
       const enter = key === "\r" || key === "\x1b[13u";
       const dir = key === "\x1b[A" ? -1 : key === "\x1b[B" ? 1 : 0;
       if (this.#menuCursor && enter) {
@@ -233,9 +235,7 @@ export class Workflow {
         return;
       }
     }
-    if (key === "\t" || key === "\x1b[9u" || key === "\x1b[Z") {
-      this.action({ id: sheet, act: "page", value: this.#page === "dag" ? "plan" : "dag" });
-    } else if (this.#page === "dag" && (key === "\x1b[D" || key === "\x1b[C")) {
+    if (this.#expanded.dag && (key === "\x1b[D" || key === "\x1b[C")) {
       const current = this.#steps.findIndex(s => s.id === this.#selectedStep);
       const next = current < 0 ? 0 : Math.max(0, Math.min(this.#steps.length - 1, current + (key === "\x1b[C" ? 1 : -1)));
       this.action({ id: `workflow-step-${next}`, act: "select-step" });
@@ -243,10 +243,8 @@ export class Workflow {
   }
 
   #controls(): Op[] {
-    return [["set", "workflow-pages", { active: this.#page }],
-      ["set", "workflow-background", { hidden: this.#page !== "dag" || !this.#background.length }],
-      ["set", "workflow-run-picker", { value: this.#selected, open: !!this.#menuCursor, active: this.#menuCursor || this.#selected,
-        hidden: this.#page !== "dag" || this.#runs.length < 2,
+    return [["set", "workflow-run-picker", { value: this.#selected, open: !!this.#menuCursor, active: this.#menuCursor || this.#selected,
+        hidden: !this.#expanded.dag || this.#runs.length < 2,
         options: this.#runs.map(run => ({ value: run.id, label: run.title, detail: displayStatus(run.status) })) }]];
   }
 
@@ -256,12 +254,36 @@ export class Workflow {
     void this.refreshPlan();
   }
 
+  async refreshUsage() {
+    const source = this.#source, route = source?.sessionId;
+    if (!this.#open || !source || !route) return;
+    const revision = ++this.#usageRevision;
+    const lines: string[] = [];
+    try {
+      const reply = await source.request("get_session_stats");
+      const stats = record(reply.data), tokens = record(stats.tokens), context = record(stats.contextUsage);
+      const count = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+      if (reply.sessionId === route && stats.sessionId === this.#owner && count(tokens.total) && tokens.total > 0) {
+        lines.push(`${tokens.total.toLocaleString("en-US")} tokens`);
+        if (count(tokens.cacheRead)) lines.push(`${tokens.cacheRead.toLocaleString("en-US")} cache read`);
+        if (count(context.tokens) && count(context.contextWindow) && context.contextWindow > 0)
+          lines.push(`Context ${context.tokens.toLocaleString("en-US")} / ${context.contextWindow.toLocaleString("en-US")}`);
+      }
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      // Optional on older runtimes. A missing reading must not look like zero usage.
+    }
+    if (!this.#open || revision !== this.#usageRevision || source !== this.#source) return;
+    const text = lines.join(" · ");
+    if (text !== this.#usage) { this.#usage = text; this.#draw(); }
+  }
+
   async refreshPlan(open?: (path: string) => void) {
-    if (!this.#open || this.#page !== "plan" || !this.#source) return;
+    if (!this.#open || !this.#expanded.plan || !this.#source) return;
     const revision = ++this.#planRevision;
     const displayed = this.#planPath;
     const path = await sessionPlanPath(this.#cwd, this.#owner);
-    if (revision !== this.#planRevision) return;
+    if (revision !== this.#planRevision || !this.#expanded.plan) return;
     if (path !== displayed) {
       this.#planPath = path;
       this.#draw();
@@ -269,22 +291,48 @@ export class Workflow {
   }
 
   #children() {
-    const title = this.#page === "plan" ? "Plan" : this.#runs.find(r => r.id === this.#selected)?.title || "DAG";
+    const title = this.#runs.find(r => r.id === this.#selected)?.title;
     const selected = this.#steps.find(s => s.id === this.#selectedStep);
-    const status = this.#page === "plan" && this.#source ? "Current session Todo" : this.#status;
-    return [node("workflow-content", "col", { gap: "sm" }, [
-      node("workflow-heading", "text", { spans: [{ t: title, s: "strong" }], hidden: this.#page === "dag" && this.#runs.length > 1 }),
-      node("workflow-status", "text", { text: status, hidden: !status }),
-      ...(this.#page === "dag" ? [node("workflow-summary", "text", { text: this.#summary, hidden: !this.#summary })] : []),
-      ...(this.#page === "plan" ? [
-      ...(this.#planPath ? [node("workflow-file", "button", { text: `Open ${basename(this.#planPath)}`, actions: { click: "open-file" } })] : []),
-      this.#todo.length ? node("workflow-todo", "checklist", { mode: "full", phases: this.#todo })
-        : node("workflow-no-todo", "text", { text: "No current Todo." }),
-    ] : [node("workflow-layout", "row", {}, [node("workflow-graph-anchor", "col"),
-    node("workflow-fallback", "col", { gap: "sm" }, this.#steps.map((step, index) => node(`workflow-step-${index}`, "button", {
-      text: `${step.label} · ${step.status}${step.needs.length ? ` · depends on ${this.#predecessors(step)}` : ""}`,
-      on: step.id === this.#selectedStep, role: "workflow-step", variant: "quiet", actions: { click: "select-step" },
-    })))]), node("workflow-dependencies", "col", { gap: "sm", hidden: !this.#steps.some(s => s.needs.length) }, [
+    const timed = this.#steps.flatMap(s => s.runtimeMs === undefined ? [] : [s.runtimeMs]);
+    const ms = timed.reduce((sum, n) => sum + n, 0);
+    const seconds = Math.floor(ms / 1000);
+    const duration = ms < 1000 ? `${ms}ms` : seconds < 60 ? `${(ms / 1000).toFixed(1)}s`
+      : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    const listItem = (index: number) => {
+      const step = this.#steps[index];
+      return node(`workflow-step-${index}`, "button", {
+        text: [step.label, step.status, step.route?.name, runtime(step),
+          step.needs.length && `depends on ${this.#predecessors(step)}`].filter(Boolean).join(" · "),
+        on: step.id === this.#selectedStep, role: "workflow-step", variant: "quiet", actions: { click: "select-step" },
+      });
+    };
+    const layers = workflowLayers(this.#steps);
+    const activity = (section: "agents" | "jobs") => {
+      const rows = this.#background.filter(r => (r.kind === "agent") === (section === "agents"));
+      return [this.#bar(section, section === "agents" ? "Agents" : "Jobs", `${rows.length}`, !rows.length),
+        node(`workflow-${section}-body`, "col", { hidden: !rows.length || !this.#expanded[section] },
+          rows.map((r, i) => node(`workflow-${section}-${i}`, "text", { text: `${r.label} · ${r.status}` })))];
+    };
+    return [this.#bar("usage", "Usage", "", !this.#usage),
+      node("workflow-usage-body", "text", { text: this.#usage, hidden: !this.#usage || !this.#expanded.usage }),
+      this.#bar("plan", "Plan"),
+      node("workflow-plan-body", "col", { gap: "sm", hidden: !this.#expanded.plan }, [
+        node("workflow-file", "button", { text: this.#planPath ? `Open ${basename(this.#planPath)}` : "",
+          hidden: !this.#planPath, actions: { click: "open-file" } }),
+        node("workflow-todo", "checklist", { mode: "full", phases: this.#todo, hidden: !this.#todo.length }),
+        node("workflow-no-todo", "text", { hidden: !!this.#todo.length || !!this.#planPath, text: "No current plan or Todo." }),
+      ]),
+      this.#bar("dag", "DAG", this.#steps.length ? `${this.#steps.filter(s => s.status === "completed").length}/${this.#steps.length}` : ""),
+      node("workflow-content", "col", { gap: "sm", hidden: !this.#expanded.dag }, [
+      node("workflow-heading", "text", { text: title || "", hidden: !title || this.#runs.length > 1 }),
+      node("workflow-status", "text", { text: this.#status, hidden: !this.#status }),
+      node("workflow-summary", "text", { text: this.#summary, hidden: !this.#summary }),
+      node("workflow-time", "text", { text: timed.length ? `Node time  ${duration} · ${timed.length}/${this.#steps.length} timed` : "", hidden: !timed.length }),
+      node("workflow-layout", "row", {}, [node("workflow-graph-anchor", "col"),
+        node("workflow-fallback", "col", { gap: "sm" }, layers ? layers.flatMap((indices, i) => [
+          node(`workflow-layer-${i}`, "text", { text: `Layer ${i + 1}` }), ...indices.map(listItem),
+        ]) : this.#steps.map((_, i) => listItem(i)))]),
+      node("workflow-dependencies", "col", { gap: "sm", hidden: !this.#steps.some(s => s.needs.length) }, [
       node("workflow-deps-heading", "text", { text: "Dependencies" }),
       ...this.#steps.flatMap((step, i) => step.needs.length ? [
         node(`workflow-dep-${i}`, "col", {}, [
@@ -300,28 +348,32 @@ export class Workflow {
       node("workflow-node-detail", "text", { text: this.#detail(), hidden: !selected }),
       ...this.#neighbors(),
       node("workflow-result", "text", { text: selected?.result || "", hidden: !selected?.result }),
-    ])]),
-    ])];
+    ])]), ...activity("agents"), ...activity("jobs")];
   }
 
   #draw() {
     if (!this.#open) return;
     const layout = this.#layout();
     const children = this.#children();
-    // Keep the live controls mounted through a status-only snapshot update.
-    if (layout && layout === this.#dagLayout) {
-      const update = (n: ReturnType<typeof node>): Op[] => [["set", n.id, n.p], ...n.c.flatMap(update)];
-      this.frame(...this.#controls(), ...children.flatMap(update), this.#graph());
-    } else {
-      this.frame(...this.#controls(), ["del", "workflow-content"],
-        ...children.map(child => ["add", child.id, sheet, "workflow-background", child]), this.#graph());
-    }
+    const update = (n: ReturnType<typeof node>): Op[] => n.id === "workflow-run-picker" ? []
+      : [["set", n.id, n.p], ...n.c.flatMap(update)];
+    const ops = children.flatMap((child, i): Op[] => {
+      if (child.id === "workflow-content" && layout !== this.#dagLayout ||
+          (child.id === "workflow-agents-body" || child.id === "workflow-jobs-body") &&
+          this.#rowCounts.get(child.id) !== child.c.length) {
+        this.#rowCounts.set(child.id, child.c.length);
+        return [["del", child.id], ["add", child.id, sheet, children[i+1]?.id ?? null, child]];
+      }
+      return update(child);
+    });
+    this.frame(...ops, ...this.#controls(), this.#graph());
     this.#dagLayout = layout;
   }
 
   #layout() {
-    return this.#page === "dag" ? JSON.stringify([this.#selected, this.#runs.map(r => r.id), this.#steps.map(s => [s.id, !!s.needs.length])]) : "";
+    return JSON.stringify([this.#selected, this.#steps.map(s => [s.id, s.needs])]);
   }
+  #rowCounts = new Map<string, number>();
 
   #predecessors(step: Step) {
     const label = (id: string) => this.#steps.find(s => s.id === id)?.label || short(id);
@@ -347,7 +399,7 @@ export class Workflow {
         hidden: !relation, role: "workflow-neighbor", variant: "quiet", actions: { click: "select-step" } });
     });
   }
-  #graph(): Op { return ["graph", this.#page === "dag" ? graph(this.#steps, this.#dark, this.#selectedStep) : null]; }
+  #graph(): Op { return ["graph", graph(this.#steps, this.#dark, this.#selectedStep)]; }
 
   #invalidate() {
     this.#revision++;

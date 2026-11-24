@@ -167,7 +167,7 @@ export function workflowCompanion(path: string, token: string, chat: string, win
       // parent width, not the window: below the threshold the native list remains.
       screen.send("s", { sf: surface, name: "workflow-graph", css:
         `[data-id='workflow-content'] { --wf-space: .5em; --wf-caption: .875em; }
-         [data-id='workflow-content'] .sf-text { font-family: -apple-system, system-ui, sans-serif; }
+         [data-id='workflow'] .sf-text, [data-id='workflow-title'] { font-family: -apple-system, system-ui, sans-serif; }
          [data-id='workflow-heading'], [data-id='workflow-deps-heading'], [data-id='workflow-detail-heading'] { font-weight: 600; }
          [data-id='workflow-heading'] { font-size: 1.15em; }
          [data-id='workflow-summary'], [data-id^='workflow-upstream-'] { font-size: var(--wf-caption); color: var(--t2); }
@@ -191,7 +191,12 @@ export function workflowCompanion(path: string, token: string, chat: string, win
          .sf-button[data-role^='workflow-'][aria-pressed='true'] { border-color: var(--t2); }
          [data-role='workflow-meta']:last-child::before { content: '• '; color: var(--wf-state); }
          [data-id='workflow-controls'] { width: 100%; align-items: center; }
-         [data-id='workflow-run-picker'] { max-width: 100%; }
+         [data-id='workflow-controls'] { justify-content: space-between; }
+         [data-id='workflow'] { min-height: 0; overflow-y: auto; }
+         [data-role='workflow-bar'] { background: var(--raise); border-top: 1px solid var(--l2); border-bottom: 1px solid var(--l2); border-left: .22em solid var(--accent); align-items: center; min-width: 0; }
+         .sf-button[data-role='workflow-fold'], .sf-button[data-role='workflow-fold'][aria-pressed='true'] { color: var(--t1); background: transparent; border-color: transparent; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+         [data-id='workflow-time'], [data-id^='workflow-layer-'], [data-id='workflow-no-todo'], [data-role='workflow-bar'] .sf-text { color: var(--t2); font-size: .875em; }
+         [data-id='workflow-run-picker'] { margin-left: auto; max-width: 60%; min-width: 0; }
          [data-id='workflow-sizing'] { height: 0; overflow: hidden; opacity: 0; }` });
       screen.frame(add(surface, node("main", "col", {}, [
         node(marker, "col", {}, [node("workflow-sizing", "text")]),
@@ -199,12 +204,10 @@ export function workflowCompanion(path: string, token: string, chat: string, win
       const reveal = () => {
         if (!socket || socket.destroyed) return;
         screen.frame(["del", marker], add("main", node("workflow-controls", "row", { gap: "sm" }, [
-          node("workflow-pages", "tabs", { aria: "Workflow pages", active: "dag", grow: 1,
-            items: [{ id: "dag", label: "DAG" }, { id: "plan", label: "Plan" }] }),
+          node("workflow-title", "text", { spans: [{ t: "Workflow", s: "strong" }], grow: 1 }),
           node("workflow-close", "button", { text: "×", aria: "Close workflow", title: "Close workflow",
             variant: "quiet", actions: { click: "close" } }),
-        ])), add("main", node("workflow-run-picker", "select", { label: "Run", aria: "Workflow run",
-          variant: "quiet", hidden: true })));
+        ])));
         ready = true;
         socket.write("ready\n");
         if (viewport) socket.write(JSON.stringify(viewport) + "\n");
@@ -289,9 +292,7 @@ export function workflowCompanion(path: string, token: string, chat: string, win
     if (i.kind === "event" && i.value.ev === "gone") { stop(); return; }
     if (ready && i.kind === "event") {
       const e = i.value;
-      if (e.id === "workflow-pages" && e.ev === "select" && (e.item === "dag" || e.item === "plan"))
-        i = { kind: "event", value: { ev: "action", id: `workflow-${e.item}`, act: "page" } };
-      else if (e.id === "workflow-run-picker" && (e.ev === "change" || e.ev === "toggle")) {
+      if (e.id === "workflow-run-picker" && (e.ev === "change" || e.ev === "toggle")) {
         if (e.ev === "toggle") menuOpen = e.open === true;
         i = { kind: "event", value: { ...e, ev: "action", act: "select-run" } };
       }
