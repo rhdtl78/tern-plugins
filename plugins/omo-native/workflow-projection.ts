@@ -6,6 +6,10 @@ export type Step = {
   readonly status: string;
   readonly needs: readonly string[];
   readonly reason: string;
+  readonly route?: { kind: "category" | "agent"; name: string; model?: string };
+  readonly runtimeMs?: number;
+  readonly attempt?: number;
+  readonly result?: string;
 };
 
 const unfinishedStates = new Set(["pending", "waiting", "ready", "queued", "scheduled", "running", "paused"]);
@@ -20,10 +24,37 @@ const failureReason = (error: unknown) => {
   const { code } = record(error);
   if (code === "start_failed") return "The node could not start (start_failed).";
   if (code === "plan_unresolved") return "OmO could not resolve the node’s execution plan (plan_unresolved).";
-  return "No safe failure reason is available.";
+  return "";
 };
 
 type SnapshotNode = Omit<Step, "reason"> & { readonly error: unknown };
+
+const count = (n: unknown) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+function execution(n: ReturnType<typeof record>) {
+  const r = record(n.route), stats = record(n.runStats);
+  const kind = r.kind === "category" || r.kind === "agent" ? r.kind : undefined;
+  const name = kind && short(r[kind]).trim();
+  const route: Step["route"] = kind && name ? { kind, name,
+    model: kind === "agent" ? short(r.model).trim() || undefined : undefined } : undefined;
+  return { route, runtimeMs: stats.duration_status === "unavailable" ? undefined : count(stats.runtime_ms),
+    attempt: count(n.attempt) };
+}
+
+// Only the successful snapshot's text, never its prompt, diagnostic or artifact path.
+function resultText(output: unknown) {
+  if (typeof output !== "string") return;
+  const clean = plain(output.replace(/\r\n?/g, "\n")).replace(/\p{Cf}/gu, "").replace(/\t/g, " ").trim();
+  if (!clean) return;
+  // Do not expose filesystem locations or navigation targets embedded in task output.
+  if (/(?:\b(?:https?|file):\/\/|(?:^|[\s"'(=])(?:\/|~\/|[A-Za-z]:[\\/]))/m.test(clean)) return;
+  let text = "", bytes = 0, lines = 1;
+  for (const ch of clean) {
+    bytes += Buffer.byteLength(ch);
+    if (bytes > 1021 || (ch === "\n" && ++lines > 5)) return text.trimEnd() + "…";
+    text += ch;
+  }
+  return text;
+}
 
 export function workflowSteps(rows: readonly unknown[]): readonly Step[] {
   const nodes = new Map<string, SnapshotNode>();
@@ -31,8 +62,9 @@ export function workflowSteps(rows: readonly unknown[]): readonly Step[] {
     const n = record(row), id = string(n.id);
     if (!id || nodes.has(id)) continue;
     nodes.set(id, {
-      id, status: displayStatus(string(n.state)), error: n.error,
-      label: short(string(n.title) || string(n.label) || string(n.name) || id),
+      id, status: displayStatus(string(n.state)), error: n.error, ...execution(n),
+      label: short(string(n.label) || id),
+      result: n.state === "completed" ? resultText(n.output) : undefined,
       needs: Array.isArray(n.dependsOn) ? [...new Set(n.dependsOn.map(string).filter(Boolean))] : [],
     });
   }
@@ -66,15 +98,14 @@ export function workflowSteps(rows: readonly unknown[]): readonly Step[] {
     }
   }
 
-  return [...nodes.values()].map(({ id, label, status, needs, error }) => {
-    const reasons = blockers.get(id);
+  return [...nodes.values()].map(({ error, ...step }) => {
+    const reasons = blockers.get(step.id);
     if (reasons) {
       const labels = reasons.slice(0, reasonLimit).map(id => short(id).slice(0, 32).trim() || "unnamed node");
-      return { id, label, status: "blocked", needs,
+      return { ...step, status: "blocked",
         reason: `Blocked by ${labels.join(", ")}${reasons.length > reasonLimit ? " …" : ""}.` };
     }
-    const reason = status === "failed" ? failureReason(error)
-      : status === "blocked" ? "No safe blocking reason is available." : "";
-    return { id, label, status, needs, reason };
+    const reason = step.status === "failed" ? failureReason(error) : "";
+    return { ...step, reason };
   });
 }

@@ -319,13 +319,6 @@ function toggleWorkflow() {
 }
 function workflowInput(i: Input) {
   if (closing || workflowLaunch?.signal.aborted || !workflow.open) return;
-  if (i.kind === "event" && i.value.ev === "resize") {
-    const cellWidth = record(i.value.cell).w;
-    if (typeof i.value.cols === "number" && typeof cellWidth === "number" && cellWidth > 1) {
-      workflow.width(i.value.cols * cellWidth);
-    }
-    return;
-  }
   if (i.kind === "event" && i.value.ev === "theme" && typeof i.value.dark === "boolean") {
     workflow.theme(i.value.dark); return;
   }
@@ -349,7 +342,7 @@ function workflowInput(i: Input) {
       return;
     }
   }
-  if (i.kind === "event" && i.value.ev === "action" && (i.value.act === "select-run" || i.value.act === "select-step")) {
+  if (i.kind === "event" && i.value.ev === "action" && (i.value.act === "select-run" || i.value.act === "select-step" || i.value.act === "dismiss-step")) {
     workflow.action(i.value);
     return;
   }

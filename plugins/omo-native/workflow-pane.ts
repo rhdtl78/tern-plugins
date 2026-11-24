@@ -5,7 +5,7 @@ import { createConnection, createServer, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { add, InputStream, node, record, Surface, surface, type Input, type Op } from "./surface";
-import { workflowGraphMinWidth } from "./workflow";
+import { workflowGraphMinWidth, type graph } from "./workflow";
 
 /** The daemon launches the companion by argv. Only this chat's private socket carries its view. */
 export async function launchWorkflowPane(tern: string, pane: string, token: string, signal: AbortSignal, onInput: (input: Input) => void,
@@ -158,12 +158,37 @@ export function workflowCompanion(path: string, token: string, chat: string, win
       if (typeof i.value.dark === "boolean") theme = { kind: "event", value: { ev: "theme", dark: i.value.dark } };
       let lastBlob = "";
       let graphMounted = false;
+      let placement = "";
       const marker = `workflowSizing${token}`;
       screen.send("o", { id: surface, mode: "screen", title: "Workflow", closable: true });
       // Tern 0.9.32 may omit pane resize events. Measure against the graph's
       // parent width, not the window: below the threshold the native list remains.
       screen.send("s", { sf: surface, name: "workflow-graph", css:
-        `.sf-image[data-id='workflow-graph'] { width: clamp(0px, calc((100% - ${workflowGraphMinWidth - 1}px) * 500), 100%); overflow: hidden; }
+        `[data-id='workflow-content'] { --wf-space: .5em; --wf-caption: .875em; }
+         [data-id='workflow-content'] .sf-text { font-family: -apple-system, system-ui, sans-serif; }
+         [data-id='workflow-heading'], [data-id='workflow-deps-heading'], [data-id='workflow-detail-heading'] { font-weight: 600; }
+         [data-id='workflow-heading'] { font-size: 1.15em; }
+         [data-id='workflow-summary'], [data-id^='workflow-upstream-'] { font-size: var(--wf-caption); color: var(--t2); }
+         [data-id^='workflow-upstream-'] { padding-left: 1em; }
+         [data-id='workflow-inspector'], [data-id='workflow-result'] { border-top: 1px solid var(--l2); padding-top: var(--wf-space); }
+         [data-id='workflow-detail-bar'] { align-items: center; justify-content: space-between; }
+         [data-id='workflow-detail-close'] { color: var(--t2); }
+         [data-id='workflow-layout'] { width: 100%; align-items: flex-start; gap: 0; }
+         [data-id='workflow-fallback'] { width: 100%; overflow: hidden; }
+         [data-id='workflow-graph'] { position: relative; width: 100%; overflow: hidden; }
+         [data-id='workflow-edges'] { width: 100%; pointer-events: none; }
+         .sf-button[data-role^='workflow-'] { color: var(--t2); background: transparent; box-shadow: none; border: 1px solid transparent; }
+         .sf-button[data-role='workflow-card'], .sf-button[data-role='workflow-card'][aria-pressed='true'] { position: absolute; background: transparent; border-color: var(--l2); overflow: hidden; box-shadow: none; }
+         .sf-button[data-role='workflow-card']::before { content: ''; position: absolute; inset: 0 auto 0 0; width: .22em; background: var(--wf-state); }
+         .sf-button[data-role='workflow-step'], .sf-button[data-role='workflow-neighbor'] { max-width: 100%; white-space: normal; text-align: left; min-height: 2.25em; height: auto; overflow-wrap: anywhere; }
+         .sf-button[data-role='workflow-step'] { min-width: 16em; }
+         [data-role='workflow-caption'] { position: absolute; box-sizing: border-box; justify-content: center; padding: 0 .8em; overflow: hidden; pointer-events: none; }
+         [data-role='workflow-caption'] * { pointer-events: none; }
+         [data-role='workflow-title'] { font-weight: bold; line-height: 1.15; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+         [data-role='workflow-meta'] { color: var(--t2); font-size: .875em; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+         .sf-button[data-role^='workflow-'][aria-pressed='true'] { border-color: var(--t2); }
+         [data-role='workflow-meta']:last-child::before { content: '• '; color: var(--wf-state); }
+         .sf-button[data-role='workflow-run-focus'] { text-decoration: underline; }
          [data-id='workflow-sizing'] { height: 0; overflow: hidden; opacity: 0; }` });
       screen.frame(add(surface, node("main", "col", {}, [
         node(marker, "col", {}, [node("workflow-sizing", "text")]),
@@ -206,20 +231,44 @@ export function workflowCompanion(path: string, token: string, chat: string, win
             if (op[0] === "del" && (op[1] === "workflow-content" || op[1] === "workflow")) graphMounted = false;
             screen.frame(op); continue;
           }
-          const svg = op[1];
-          if (!graphAllowed || typeof svg !== "string" || svg.length > 8000) {
+          const model: ReturnType<typeof graph> = op[1];
+          if (!graphAllowed || !model || model.svg.length > 8000) {
             if (graphMounted) screen.frame(["del", "workflow-graph"]);
+            if (placement) screen.send("s", { sf: surface, name: "workflow-placement", css:
+              "[data-id='workflow-graph-anchor'] { width: 0; } [data-id='workflow-fallback'] { width: 100%; }" });
+            placement = "";
             graphMounted = false;
             continue;
           }
+          const { svg, cards, width, height } = model;
           const id = createHash("sha256").update(svg).digest("hex");
           if (id !== lastBlob) {
             process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${Buffer.from(svg).toString("base64")}\x1b\\`);
             lastBlob = id;
           }
-          if (graphMounted) screen.frame(["set", "workflow-graph", { blob: id }]);
-          else screen.frame(["add", "workflow-graph", "workflow-graph-anchor", null,
-            node("workflow-graph", "image", { blob: id, alt: "DAG dependency arrows; dependencies are also listed below." })]);
+          // Tern shrinks an SVG to fit but doesn't enlarge it beyond its intrinsic width.
+          const ink = (status: string) => status === "completed" ? "--ok" :
+            ["failed", "blocked", "cancelled", "canceled"].includes(status) ? "--bad" : status === "running" ? "--accent" : "--t2";
+          const graphWidth = `clamp(0px, calc((100% - ${workflowGraphMinWidth - 1}px) * 500), 100%)`;
+          const css = `[data-id='workflow-graph-anchor'] { width: ${graphWidth}; min-width: 0; overflow: hidden; }
+            [data-id='workflow-fallback'] { width: calc(100% - ${graphWidth}); min-width: 0; overflow: hidden; }
+            [data-id='workflow-graph'] { max-width: ${width}px; align-self: center; }\n` +
+            cards.map(c => `[data-id='${c.id}'], [data-id='${c.id}-caption'] { --wf-state: var(${ink(c.status)}); left: ${100 * c.left / width}%; top: ${100 * c.top / height}%; min-width: ${100 * c.width / width}%; width: ${100 * c.width / width}%; height: ${100 * c.height / height}%; }`).join("\n");
+          if (css !== placement) {
+            screen.send("s", { sf: surface, name: "workflow-placement", css });
+            placement = css;
+          }
+          const caption = (c: typeof cards[number]) => node(`${c.id}-caption`, "col", { role: "workflow-caption" }, [
+            node(`${c.id}-title`, "text", { role: "workflow-title", text: c.label }),
+            node(`${c.id}-route`, "text", { role: "workflow-meta", text: c.route, hidden: !c.route }),
+            node(`${c.id}-state`, "text", { role: "workflow-meta", text: c.state }),
+          ]);
+          if (graphMounted) screen.frame(["set", "workflow-edges", { blob: id }],
+            ...cards.flatMap((c): Op[] => [["set", c.id, c.props], ...caption(c).c.map(n => ["set", n.id, n.p])]));
+          else screen.frame(add("workflow-graph-anchor", node("workflow-graph", "col", {}, [
+            node("workflow-edges", "image", { blob: id, alt: "Dependency arrows", actions: { click: "ignore" } }),
+            ...cards.flatMap(c => [node(c.id, "button", c.props), caption(c)]),
+          ])));
           graphMounted = true;
         }
       });

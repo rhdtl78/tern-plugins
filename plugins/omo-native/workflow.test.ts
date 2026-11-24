@@ -15,28 +15,33 @@ test("vertical DAG keeps a direct edge around the intermediate node", () => {
     { id: "B", label: "B", status: "completed", needs: ["A"], reason: "" },
     { id: "C", label: "C", status: "completed", needs: ["A", "B"], reason: "" },
   ];
-  const dark = graph(steps, true);
-  expect(dark).toContain("A &amp; &lt;review&gt;");
-  const cards = [...(dark ?? "").matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)];
-  const paths = [...(dark ?? "").matchAll(/<path d="M([\d.]+) ([\d.]+) V[\d.]+ H([\d.]+) V[\d.]+ H([\d.]+) V([\d.]+)"/g)];
-  const [source, middle, target] = cards;
+  const dark = graph(steps, true, "B");
+  if (!dark) throw Error("Expected a drawable graph");
+  expect(dark.svg).not.toMatch(/<text|<rect|review/);
+  expect(dark.cards[0]).toMatchObject({ label: "A & <review>", state: "completed", props: { aria: "A & <review>, completed" } });
+  expect(dark.cards.map(c => c.props.on)).toEqual([false, true, false]);
+  const paths = [...dark.svg.matchAll(/<path d="M([\d.]+) ([\d.]+) V[\d.]+ H([\d.]+) V[\d.]+ H([\d.]+) V([\d.]+)"/g)];
+  const [source, middle, target] = dark.cards;
   const [bypass] = paths;
   if (!source || !middle || !target || !bypass) throw Error("Expected three cards and a bypass path");
-  const center = (card: RegExpMatchArray) => Number(card[1]) + Number(card[3]) / 2;
+  const center = (card: typeof source) => card.left + card.width / 2;
   expect(Number(bypass[1])).toBe(center(source));
-  expect(Number(bypass[2])).toBe(Number(source[2]) + Number(source[4]));
-  expect(Number(bypass[3])).toBeLessThan(Number(middle[1]));
+  expect(Number(bypass[2])).toBe(source.top + source.height);
+  expect(Number(bypass[3])).toBeLessThan(middle.left);
   expect(Number(bypass[4])).toBe(center(target));
-  expect(Number(bypass[5])).toBeLessThan(Number(target[2]));
-  expect(graph(steps, false)).not.toBe(dark);
+  expect(Number(bypass[5])).toBeLessThan(target.top);
+  expect(graph(steps, false)?.svg).not.toBe(dark.svg);
+  const refreshed = graph(steps.map(s => ({ ...s, status: "running" })), true, "B");
+  expect(refreshed?.cards.map(c => c.id)).toEqual(dark.cards.map(c => c.id));
+  expect(refreshed?.svg).toEqual(dark.svg);
 });
 
 test("a renderer without native workflow controls cannot offer the pane", () => {
   expect(supportsWorkflow({ features: ["aside", "blobs"], kinds: ["prefs", "image"] })).toBe(false);
 });
 
-test("shows the graph at the default pane width and keeps the list when narrowed", async () => {
-  let rendered = Promise.withResolvers<void>();
+test("provides both layouts and keeps selection when switching between row and card", async () => {
+  const rendered = Promise.withResolvers<void>();
   const frames: unknown[] = [];
   const workflow = new Workflow((...ops) => {
     frames.push(...ops);
@@ -48,22 +53,21 @@ test("shows the graph at the default pane width and keeps the list when narrowed
       : { runId: "run", parentSessionId: "owner", nodes: [{ id: "A", state: "completed" }] };
     return { data: { ok: true, value } };
   } }, "owner", "/tmp");
-  // The 420px outer pane has 26px of chrome and padding.
-  workflow.width(394);
   workflow.toggle();
   await rendered.promise;
   expect(JSON.stringify(frames)).toContain("<svg");
   frames.length = 0;
-  rendered = Promise.withResolvers<void>();
-  workflow.width(310);
-  await rendered.promise;
-  expect(frames).toContainEqual(["graph", null]);
-  expect(JSON.stringify(frames)).toContain("A · completed");
+  workflow.action({ id: "workflow-card-0", act: "select-step" });
+  expect(frames).toContainEqual(["set", "workflow-node-detail", { text: "A · completed", hidden: false }]);
+  expect(frames).toContainEqual(["set", "workflow-step-0", expect.objectContaining({ on: true, variant: "quiet" })]);
   frames.length = 0;
-  rendered = Promise.withResolvers<void>();
-  workflow.width(394);
-  await rendered.promise;
+  // Pane geometry chooses between both controls without waiting for a resize event.
+  workflow.action({ id: "workflow-step-0", act: "select-step" });
+  expect(JSON.stringify(frames)).toContain("A · completed");
   expect(JSON.stringify(frames)).toContain("<svg");
+  expect(frames).toContainEqual(["graph", expect.objectContaining({ cards: [expect.objectContaining({
+    id: "workflow-card-0", props: expect.objectContaining({ on: true }),
+  })] })]);
 });
 
 test("a late duplicate or failed Todo cannot replace the latest cleared checklist", () => {
@@ -81,6 +85,41 @@ test("a late duplicate or failed Todo cannot replace the latest cleared checklis
 
 const updated = (owner: string) => ({ type: "extension_event", name: "omo.dag.updated", data: { parent_session_id: owner } });
 const listed = (...runs: readonly RpcRecord[]) => ({ data: { ok: true, value: { runs } } });
+
+test("direct neighbors share selection and update in place when the selected worker finishes", async () => {
+  let terminal = false;
+  const frames: unknown[] = [];
+  const workflow = new Workflow((...ops) => frames.push(...ops));
+  workflow.bind({ async request(_, fields) {
+    if (fields?.name === "omo.dag.list") return listed({ runId: "r", parentSessionId: "owner" });
+    return { data: { ok: true, value: { runId: "r", parentSessionId: "owner", nodes: [
+      { id: "root", state: "completed", route: { kind: "category", category: "quick", model: "ignore" } },
+      { id: "next", dependsOn: ["root"], state: terminal ? "completed" : "scheduled", attempt: terminal ? 1 : 0,
+        route: { kind: "agent", agent: "reviewer", model: "explicit/config" }, execAttempt: 9,
+        runStats: terminal ? { runtime_ms: 4522, turns: 1, tool_calls: 0 } : undefined,
+        prompt: "secret", output: "Actual result", error: { message: "secret" } },
+    ] } } };
+  } }, "owner", "/tmp");
+  workflow.toggle();
+  await Bun.sleep(0);
+  workflow.action({ act: "select-step", id: "workflow-card-0" });
+  expect(frames).toContainEqual(["set", "workflow-neighbor-1", expect.objectContaining({ text: "Successor: next", hidden: false })]);
+  frames.length = 0;
+  workflow.action({ act: "select-step", id: "workflow-neighbor-1" });
+  const detail = () => frames.findLast(f => Array.isArray(f) && f[1] === "workflow-node-detail");
+  expect(detail()).toEqual(["set", "workflow-node-detail", { text: "next · scheduled\nAttempts: 0\nAgent: reviewer\nConfigured model: explicit/config", hidden: false }]);
+  expect(frames).toContainEqual(["set", "workflow-result", { text: "", hidden: true }]);
+  terminal = true;
+  workflow.event(updated("owner"));
+  await Bun.sleep(0);
+  expect(detail()).toEqual(["set", "workflow-node-detail", { text: "next · completed\nRuntime: 4.5s · Attempts: 1\nAgent: reviewer\nConfigured model: explicit/config", hidden: false }]);
+  expect(frames).toContainEqual(["set", "workflow-result", { text: "Actual result", hidden: false }]);
+  expect(frames).toContainEqual(["set", "workflow-step-1", expect.objectContaining({ on: true })]);
+  expect(JSON.stringify(frames)).not.toMatch(/secret|ignore|"del"/);
+  expect(frames).toContainEqual(["set", "workflow-neighbor-0", expect.objectContaining({ text: "Predecessor: root", hidden: false })]);
+  workflow.action({ act: "select-step", id: "workflow-neighbor-0" });
+  expect(detail()).toEqual(["set", "workflow-node-detail", { text: "root · completed\nCategory: quick", hidden: false }]);
+});
 
 test("disconnect fences the response from an in-flight list", async () => {
   const frames: unknown[] = [];
@@ -100,6 +139,35 @@ test("disconnect fences the response from an in-flight list", async () => {
   expect(JSON.stringify(frames)).toContain("Session disconnected");
 });
 
+test("result previews are bounded text from successful nodes, not paths or diagnostics", () => {
+  const result = (state: string, output: unknown) =>
+    workflowSteps([{ id: "A", state, output, prompt: "private", error: { message: "private" } }])[0]?.result;
+  expect(result("completed", "\x1b[31m<b>ok</b>\x1b[0m\u202e")).toBe("<b>ok</b>");
+  expect(result("completed", "1\n2\n3\n4\n5\n6")).toBe("1\n2\n3\n4\n5…");
+  const preview = result("completed", "가".repeat(1000))!;
+  expect(Buffer.byteLength(preview)).toBeLessThanOrEqual(1024);
+  expect(preview).toEndWith("…");
+  for (const value of ["", undefined, {}, "read /tmp/private", "https://example.invalid/"]) {
+    expect(result("completed", value)).toBeUndefined();
+  }
+  expect(result("failed", "diagnostic")).toBeUndefined();
+});
+
+test("a mismatched snapshot cannot expose terminal output from another owner or run", async () => {
+  for (const [owner, runId] of [["other", "r"], ["owner", "other"]]) {
+    const frames: unknown[] = [];
+    const workflow = new Workflow((...ops) => frames.push(...ops));
+    workflow.bind({ async request(_, fields) {
+      return fields?.name === "omo.dag.list" ? listed({ parentSessionId: "owner", runId: "r" })
+        : { data: { ok: true, value: { parentSessionId: owner, runId, nodes: [{ id: "A", state: "completed", output: "private-result" }] } } };
+    } }, "owner", "/tmp");
+    workflow.toggle();
+    await Bun.sleep(0);
+    workflow.action({ id: "workflow-card-0", act: "select-step" });
+    expect(JSON.stringify(frames)).toContain("Workflow data unavailable");
+    expect(JSON.stringify(frames)).not.toContain("private-result");
+  }
+});
 test("a connected pane ignores foreign invalidations and refreshes for its own owner", async () => {
   let drawn = Promise.withResolvers<void>();
   let requests = 0;
@@ -140,7 +208,7 @@ test("distinguishes an older RPC rejection from a supported empty list", async (
 });
 
 test("shows an owned paused run by default and retains a visible manual selection on refresh", async () => {
-  let waitFor = "active · paused";
+  let waitFor = "paused · 0/0";
   let drawn = Promise.withResolvers<string>();
   let refresh = false;
   const workflow = new Workflow((...ops) => {
@@ -160,17 +228,18 @@ test("shows an owned paused run by default and retains a visible manual selectio
   } }, "owner", "/tmp");
   workflow.toggle();
   const initial = await drawn.promise;
-  expect(initial).toContain("Selected: active");
+  expect(initial).toContain('"text":"active","on":true');
+  expect(initial).not.toMatch(/Selected:|"primary"/);
   expect(initial).not.toContain("workflow-run-foreign");
-  waitFor = "finished · completed";
+  waitFor = "completed · 0/0";
   drawn = Promise.withResolvers<string>();
   workflow.action({ act: "select-run", id: "workflow-run-finished" });
-  expect(await drawn.promise).toContain("Selected: finished");
+  expect(await drawn.promise).toContain('"text":"finished","on":true');
   refresh = true;
-  waitFor = "finished · completed · 1/1";
+  waitFor = "completed · 1/1";
   drawn = Promise.withResolvers<string>();
   workflow.event(updated("owner"));
-  expect(await drawn.promise).toContain("Selected: finished");
+  expect(await drawn.promise).toContain('"text":"finished","on":true');
 });
 
 test("attributes a skip only to failed or cancelled ancestors reachable through skipped nodes", () => {
@@ -186,7 +255,7 @@ test("attributes a skip only to failed or cancelled ancestors reachable through 
   expect(projected.find(n => n.id === "C")).toMatchObject({ status: "blocked", reason: "Blocked by A, K." });
   expect(projected.find(n => n.id === "X")).toMatchObject({ status: "blocked", reason: "Blocked by A, K." });
   expect(projected.find(n => n.id === "Y")).toMatchObject({ status: "skipped", reason: "" });
-  expect(projected.find(n => n.id === "Z")).toMatchObject({ status: "blocked", reason: "No safe blocking reason is available." });
+  expect(projected.find(n => n.id === "Z")).toMatchObject({ status: "blocked", reason: "" });
   expect(JSON.stringify(projected)).not.toMatch(/private failure|private task/);
 });
 

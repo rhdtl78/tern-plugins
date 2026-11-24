@@ -8,8 +8,10 @@ import { displayStatus, short, unfinished, workflowSteps, type Step } from "./wo
 const sheet = "workflow";
 export const workflowGraphMinWidth = 380;
 type Run = { readonly id: string; readonly title: string; readonly status: string };
+const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
+  s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
 
-export function graph(steps: readonly Step[], dark: boolean): string | undefined {
+export function graph(steps: readonly Step[], dark: boolean, selected = "") {
   if (!steps.length || steps.length > 12 || steps.reduce((n, s) => n + s.needs.length, 0) > 24) return;
   const levels = new Map<string, number>();
   for (let i = 0; i < steps.length; i++) {
@@ -30,19 +32,14 @@ export function graph(steps: readonly Step[], dark: boolean): string | undefined
   const routeCount = steps.reduce((n, s) => n + s.needs.filter(id =>
     (levels.get(s.id) ?? 0) - (levels.get(id) ?? 0) > 1).length, 0);
   if (rows.size > 7 || routeCount > 5 || [...rows.values()].some(row => row.length > 3)) return;
-  const width = 480, cardHeight = 58, stride = 106, gutter = 30 + routeCount * 5;
+  const width = 480, cardHeight = 78, stride = cardHeight + 32, gutter = 30 + routeCount * 5;
   const height = 22 + (rows.size - 1) * stride + cardHeight;
   const points = new Map<string, readonly [number, number, number]>();
   for (const [depth, row] of rows) {
     const available = width - gutter * 2, slot = available / row.length;
     row.forEach((step, i) => points.set(step.id, [gutter + (i + 0.5) * slot, 11 + depth * stride, Math.min(235, slot - 10)]));
   }
-  const ink = dark ? "#e9e4eb" : "#241f29";
   const edge = dark ? "#9c93a2" : "#65596d";
-  const card = dark ? "#27232c" : "#fbf9fc";
-  const outline = dark ? "#514858" : "#cfc4d5";
-  const success = dark ? "#8ad7ae" : "#286647";
-  const escape = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   let outer = 0;
   const edges = steps.flatMap(step => step.needs.map(id => {
     const target = points.get(step.id);
@@ -57,17 +54,19 @@ export function graph(steps: readonly Step[], dark: boolean): string | undefined
       : `M${sx} ${sy} V${mid} H${x} V${y - 1}`;
     return `<path d="${path}" fill="none" stroke="${edge}" stroke-width="1.6" stroke-linejoin="round"/><path d="M${x - 4} ${y - 7} L${x} ${y - 1} L${x + 4} ${y - 7}Z" fill="${edge}"/>`;
   })).join("");
-  const cards = steps.map(step => {
+  const cards = steps.flatMap((step, i) => {
     const point = points.get(step.id);
-    if (!point) return "";
-    const [x, y, wide] = point, left = x - wide / 2;
-    const label = [...step.label], limit = Math.floor((wide - 24) / 7);
-    const title = escape(label.length > limit ? label.slice(0, limit - 1).join("") + "…" : label.join(""));
-    const state = escape([...step.status].slice(0, 25).join(""));
-    const accent = step.status === "completed" ? success : edge;
-    return `<rect x="${left}" y="${y}" width="${wide}" height="${cardHeight}" rx="9" fill="${card}" stroke="${outline}"/><path d="M${left + 2} ${y + 12} V${y + 46}" stroke="${accent}" stroke-width="3"/><text x="${left + 13}" y="${y + 23}" fill="${ink}" font-size="13">${title}</text><text x="${left + 13}" y="${y + 43}" fill="${accent}" font-size="11">${state}</text>`;
-  }).join("");
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${edges}${cards}</svg>`;
+    if (!point) return [];
+    const [x, y, wide] = point;
+    const id = `workflow-card-${i}`;
+    const state = [step.status, runtime(step)].filter(Boolean).join(" · ");
+    const route = step.route?.name || "";
+    return [{ id, left: x - wide / 2, top: y, width: wide, height: cardHeight,
+      label: step.label, route, state, status: step.status,
+      props: { aria: [step.label, route, state].filter(Boolean).join(", "), role: "workflow-card", variant: "quiet",
+        on: step.id === selected, actions: { click: "select-step" } } }];
+  });
+  return { width, height, cards, svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${edges}</svg>` };
 }
 
 export function supportsWorkflow(hello: RpcRecord): boolean {
@@ -96,7 +95,6 @@ export class Workflow {
   #planRevision = 0;
   #page = "dag";
   #keyRow = 0;
-  #wide = true;
   #dark = false;
   #summary = "";
   constructor(private readonly frame: (...ops: Op[]) => void) {}
@@ -105,6 +103,7 @@ export class Workflow {
 
   bind(source: Pick<OmoRpc, "request">, owner: string, cwd: string) {
     if (!owner || !cwd) return;
+    this.#clearRun();
     this.#source = source;
     this.#owner = owner;
     this.#cwd = cwd;
@@ -115,17 +114,18 @@ export class Workflow {
 
   disconnect() {
     this.#source = undefined;
+    this.#clearRun();
     this.#revision++;
     this.#resetPlan();
     this.#status = "Session disconnected";
     this.#draw();
   }
 
-  width(pixels: number) {
-    // Below this width the graph's labels are less readable than the native rows.
-    const wide = pixels >= workflowGraphMinWidth;
-    if (wide !== this.#wide) { this.#wide = wide; this.#draw(); }
+  #clearRun() {
+    this.#runs = []; this.#steps = [];
+    this.#manualRun = this.#selected = this.#selectedStep = this.#summary = "";
   }
+
   theme(dark: boolean) {
     if (dark !== this.#dark) { this.#dark = dark; this.#draw(); }
   }
@@ -174,10 +174,15 @@ export class Workflow {
         this.#invalidate();
       }
     }
+    if (event.act === "dismiss-step" && this.#page === "dag") {
+      this.#selectedStep = "";
+      this.#draw();
+    }
     if (event.act === "select-step" && this.#page === "dag") {
-      const step = this.#steps.find((_, index) => event.id === `workflow-step-${index}`);
-      if (step && step.id !== this.#selectedStep) {
-        this.#selectedStep = step.id;
+      const step = this.#steps.find((_, index) => event.id === `workflow-step-${index}` || event.id === `workflow-card-${index}` ||
+        event.id === `workflow-neighbor-${index}`);
+      if (step) {
+        this.#selectedStep = step.id === this.#selectedStep && event.id === `workflow-card-${this.#steps.indexOf(step)}` ? "" : step.id;
         this.#draw();
       }
     }
@@ -218,7 +223,8 @@ export class Workflow {
   }
 
   #children() {
-    const title = this.#page === "plan" ? "Plan" : "DAG";
+    const title = this.#page === "plan" ? "Plan" : this.#runs.find(r => r.id === this.#selected)?.title || "DAG";
+    const selected = this.#steps.find(s => s.id === this.#selectedStep);
     const status = this.#page === "plan" && this.#source ? "Current session Todo" : this.#status;
     return [node("workflow-content", "col", { gap: "sm" }, [
       node("workflow-heading", "text", { spans: [{ t: title, s: "strong" }] }),
@@ -228,15 +234,30 @@ export class Workflow {
       ...(this.#planPath ? [node("workflow-file", "button", { text: `Open ${basename(this.#planPath)}`, actions: { click: "open-file" } })] : []),
       this.#todo.length ? node("workflow-todo", "checklist", { mode: "full", phases: this.#todo })
         : node("workflow-no-todo", "text", { text: "No current Todo." }),
-    ] : [...this.#runs.map((run, index) => node(`workflow-run-${run.id}`, "button", {
-      text: `${run.id === this.#selected ? "Selected: " : ""}${run.title}`,
-      variant: index === this.#keyRow ? "primary" : "quiet", actions: { click: "select-run" },
-    })), node("workflow-graph-anchor", "col"), ...(this.#steps.length ? [
-      node("workflow-node-keys", "text", { text: "Inspect a node: ← / →" }),
-    ] : []), ...this.#steps.map((step, index) => node(`workflow-step-${index}`, "button", {
-      text: `${step.id === this.#selectedStep ? "Selected: " : ""}${step.label} · ${step.status}${step.needs.length ? ` · depends on ${this.#predecessors(step)}` : ""}`,
-      variant: step.id === this.#selectedStep ? "primary" : "quiet", actions: { click: "select-step" },
-    })), node("workflow-node-detail", "text", { text: this.#detail(), hidden: !this.#selectedStep })]),
+    ] : [...(this.#runs.length > 1 ? this.#runs : []).map((run, index) => node(`workflow-run-${run.id}`, "button", {
+      text: run.title, on: run.id === this.#selected, variant: "quiet",
+      role: index === this.#keyRow ? "workflow-run-focus" : "workflow-run", actions: { click: "select-run" },
+    })), node("workflow-layout", "row", {}, [node("workflow-graph-anchor", "col"),
+    node("workflow-fallback", "col", { gap: "sm" }, this.#steps.map((step, index) => node(`workflow-step-${index}`, "button", {
+      text: `${step.label} · ${step.status}${step.needs.length ? ` · depends on ${this.#predecessors(step)}` : ""}`,
+      on: step.id === this.#selectedStep, role: "workflow-step", variant: "quiet", actions: { click: "select-step" },
+    })))]), node("workflow-dependencies", "col", { gap: "sm", hidden: !this.#steps.some(s => s.needs.length) }, [
+      node("workflow-deps-heading", "text", { text: "Dependencies" }),
+      ...this.#steps.flatMap((step, i) => step.needs.length ? [
+        node(`workflow-dep-${i}`, "col", {}, [
+          node(`workflow-dep-title-${i}`, "text", { text: `${step.label} · ${step.status}` }),
+          node(`workflow-upstream-${i}`, "text", { text: this.#predecessors(step) }),
+        ]),
+      ] : []),
+    ]), node("workflow-inspector", "col", { hidden: !selected, gap: "sm" }, [
+      node("workflow-detail-bar", "row", { gap: "sm" }, [
+        node("workflow-detail-heading", "text", { text: "Node details" }),
+        node("workflow-detail-close", "button", { text: "×", aria: "Close node details", variant: "quiet", actions: { click: "dismiss-step" } }),
+      ]),
+      node("workflow-node-detail", "text", { text: this.#detail(), hidden: !selected }),
+      ...this.#neighbors(),
+      node("workflow-result", "text", { text: selected?.result || "", hidden: !selected?.result }),
+    ])]),
     ])];
   }
 
@@ -246,8 +267,8 @@ export class Workflow {
     const children = this.#children();
     // Keep the live controls mounted through a status-only snapshot update.
     if (layout && layout === this.#dagLayout) {
-      this.frame(...children.flatMap(n => n.c.filter(c => c.k !== "col")
-        .map((c): Op => ["set", c.id, c.p])), this.#graph());
+      const update = (n: ReturnType<typeof node>): Op[] => [["set", n.id, n.p], ...n.c.flatMap(update)];
+      this.frame(...children.flatMap(update), this.#graph());
     } else {
       this.frame(["del", "workflow-content"], ...children.map(child => add(sheet, child)), this.#graph());
     }
@@ -255,7 +276,7 @@ export class Workflow {
   }
 
   #layout() {
-    return this.#page === "dag" ? JSON.stringify([this.#selected, this.#runs.map(r => r.id), this.#steps.map(s => s.id)]) : "";
+    return this.#page === "dag" ? JSON.stringify([this.#selected, this.#runs.map(r => r.id), this.#steps.map(s => [s.id, !!s.needs.length])]) : "";
   }
 
   #predecessors(step: Step) {
@@ -266,9 +287,23 @@ export class Workflow {
   #detail() {
     const step = this.#steps.find(s => s.id === this.#selectedStep);
     if (!step) return "";
-    return `${step.label} · ${step.status}\nPredecessors: ${this.#predecessors(step) || "None"}${step.reason ? `\nReason: ${step.reason}` : ""}`;
+    const r = step.route;
+    return [`${step.label} · ${step.status}`,
+      [runtime(step) && `Runtime: ${runtime(step)}`, step.attempt !== undefined && `Attempts: ${step.attempt}`].filter(Boolean).join(" · "),
+      r && `${r.kind === "agent" ? "Agent" : "Category"}: ${r.name}`, r?.model && `Configured model: ${r.model}`,
+      step.reason && `Reason: ${step.reason}`].filter(Boolean).join("\n");
   }
-  #graph(): Op { return ["graph", this.#wide && this.#page === "dag" ? graph(this.#steps, this.#dark) : null]; }
+  #neighbors() {
+    const selected = this.#steps.find(s => s.id === this.#selectedStep);
+    const needs = new Set(selected?.needs);
+    // Stable targets keep the same native controls across selection and status updates.
+    return this.#steps.map((step, i) => {
+      const relation = needs.has(step.id) ? "Predecessor" : selected && step.needs.includes(selected.id) ? "Successor" : "";
+      return node(`workflow-neighbor-${i}`, "button", { text: relation ? `${relation}: ${step.label}` : "",
+        hidden: !relation, role: "workflow-neighbor", variant: "quiet", actions: { click: "select-step" } });
+    });
+  }
+  #graph(): Op { return ["graph", this.#page === "dag" ? graph(this.#steps, this.#dark, this.#selectedStep) : null]; }
 
   #invalidate() {
     this.#revision++;
@@ -304,7 +339,7 @@ export class Workflow {
           throw new Error("Invalid OmO snapshot owner");
         }
         steps = workflowSteps(snap.nodes);
-        summary = `${selected.title} · ${displayStatus(string(snap.status))} · ${steps.filter(s => s.status === "completed").length}/${steps.length} completed`;
+        summary = `${displayStatus(string(snap.status))} · ${steps.filter(s => s.status === "completed").length}/${steps.length} completed`;
         for (const status of ["failed", "blocked"]) {
           const count = steps.filter(s => s.status === status).length;
           if (count) summary += ` · ${count} ${status}`;
