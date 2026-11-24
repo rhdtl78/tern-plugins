@@ -29,7 +29,7 @@ test("vertical DAG keeps a direct edge around the intermediate node", () => {
   expect(Number(bypass[1])).toBe(center(source));
   expect(Number(bypass[2])).toBe(source.top + source.height);
   expect(Number(bypass[3])).toBeLessThan(middle.left);
-  expect(Number(bypass[4])).toBe(center(target));
+  expect(Number(bypass[4])).toBe(target.left + target.width / 3);
   expect(Number(bypass[5])).toBeLessThan(target.top);
   expect(graph(steps, false)?.svg).not.toBe(dark.svg);
   const refreshed = graph(steps.map(s => ({ ...s, status: "running" })), true, "B");

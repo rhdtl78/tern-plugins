@@ -6,6 +6,8 @@ import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
 import type { ActivityView } from "./activity";
 import { displayStatus, short, unfinished, workflowLayers, workflowSteps, type Step } from "./workflow-projection";
+import { graph } from "./workflow-graph";
+export { graph } from "./workflow-graph";
 
 const sheet = "workflow";
 export const workflowGraphMinWidth = 380;
@@ -14,52 +16,6 @@ type Section = "usage" | "plan" | "dag" | "agents" | "jobs";
 type Reader = Pick<OmoRpc, "request"> & Partial<Pick<OmoRpc, "sessionId">>;
 const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
   s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
-
-export function graph(steps: readonly Step[], dark: boolean, selected = "") {
-  if (!steps.length || steps.length > 12 || steps.reduce((n, s) => n + s.needs.length, 0) > 24) return;
-  const layers = workflowLayers(steps);
-  if (!layers) return;
-  const rows = layers.map(indices => indices.map(i => steps[i]));
-  const levels = new Map(rows.flatMap((row, depth) => row.map(s => [s.id, depth] as const)));
-  const routeCount = steps.reduce((n, s) => n + s.needs.filter(id =>
-    (levels.get(s.id) ?? 0) - (levels.get(id) ?? 0) > 1).length, 0);
-  if (rows.length > 7 || routeCount > 5 || rows.some(row => row.length > 3)) return;
-  const width = 480, cardHeight = 78, stride = cardHeight + 32, gutter = 30 + routeCount * 5;
-  const height = 22 + (rows.length - 1) * stride + cardHeight;
-  const points = new Map<string, readonly [number, number, number]>();
-  for (const [depth, row] of rows.entries()) {
-    const available = width - gutter * 2, slot = available / row.length;
-    row.forEach((step, i) => points.set(step.id, [gutter + (i + 0.5) * slot, 11 + depth * stride, Math.min(235, slot - 10)]));
-  }
-  const edge = dark ? "#9c93a2" : "#65596d";
-  let outer = 0;
-  const edges = steps.flatMap(step => step.needs.map(id => {
-    const target = points.get(step.id);
-    const source = points.get(id);
-    if (!target || !source) return "";
-    const [x, y] = target, [sx, top] = source, sy = top + cardHeight, mid = sy + 24;
-    const skip = y - top > stride;
-    const rail = 10 + outer * 5;
-    if (skip) outer++;
-    const path = skip
-      ? `M${sx} ${sy} V${sy + 12} H${rail} V${y - 15} H${x} V${y - 1}`
-      : `M${sx} ${sy} V${mid} H${x} V${y - 1}`;
-    return `<path d="${path}" fill="none" stroke="${edge}" stroke-width="1.6" stroke-linejoin="round"/><path d="M${x - 4} ${y - 7} L${x} ${y - 1} L${x + 4} ${y - 7}Z" fill="${edge}"/>`;
-  })).join("");
-  const cards = steps.flatMap((step, i) => {
-    const point = points.get(step.id);
-    if (!point) return [];
-    const [x, y, wide] = point;
-    const id = `workflow-card-${i}`;
-    const state = [step.status, runtime(step)].filter(Boolean).join(" · ");
-    const route = step.route?.name || "";
-    return [{ id, left: x - wide / 2, top: y, width: wide, height: cardHeight,
-      label: step.label, route, state, status: step.status,
-      props: { aria: [step.label, route, state].filter(Boolean).join(", "), role: "workflow-card", variant: "quiet",
-        on: step.id === selected, actions: { click: "select-step" } } }];
-  });
-  return { width, height, cards, svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${edges}</svg>` };
-}
 
 export function supportsWorkflow(hello: RpcRecord): boolean {
   const kinds = hello.kinds;
