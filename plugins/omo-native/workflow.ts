@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { sessionPlanPath } from "./plan-link";
+import { usageBody, workflowUsage } from "./workflow-usage";
 import { RpcCommandError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
@@ -85,7 +86,7 @@ export class Workflow {
   #planPath: string | undefined;
   #planRevision = 0;
   #expanded = { usage: true, plan: true, dag: true, agents: true, jobs: true };
-  #usage = "";
+  #usage: ReturnType<typeof workflowUsage>;
   #usageRevision = 0;
   #menuCursor = "";
   #dark = false;
@@ -118,7 +119,7 @@ export class Workflow {
 
   #clearRun() {
     this.#usageRevision++;
-    this.#usage = "";
+    this.#usage = undefined;
     this.#menuCursor = "";
     this.#runs = []; this.#steps = [];
     this.#manualRun = this.#selected = this.#selectedStep = this.#summary = "";
@@ -265,24 +266,17 @@ export class Workflow {
     const source = this.#source, route = source?.sessionId;
     if (!this.#open || !source || !route) return;
     const revision = ++this.#usageRevision;
-    const lines: string[] = [];
+    let usage: ReturnType<typeof workflowUsage>;
     try {
       const reply = await source.request("get_session_stats");
-      const stats = record(reply.data), tokens = record(stats.tokens), context = record(stats.contextUsage);
-      const count = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
-      if (reply.sessionId === route && stats.sessionId === this.#owner && count(tokens.total) && tokens.total > 0) {
-        lines.push(`${tokens.total.toLocaleString("en-US")} tokens`);
-        if (count(tokens.cacheRead)) lines.push(`${tokens.cacheRead.toLocaleString("en-US")} cache read`);
-        if (count(context.tokens) && count(context.contextWindow) && context.contextWindow > 0)
-          lines.push(`Context ${context.tokens.toLocaleString("en-US")} / ${context.contextWindow.toLocaleString("en-US")}`);
-      }
+      const stats = record(reply.data);
+      if (reply.sessionId === route && stats.sessionId === this.#owner) usage = workflowUsage(stats);
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       // Optional on older runtimes. A missing reading must not look like zero usage.
     }
     if (!this.#open || revision !== this.#usageRevision || source !== this.#source) return;
-    const text = lines.join(" · ");
-    if (text !== this.#usage) { this.#usage = text; this.#draw(); }
+    if (JSON.stringify(usage) !== JSON.stringify(this.#usage)) { this.#usage = usage; this.#draw(); }
   }
 
   async refreshPlan(open?: (path: string) => void) {
@@ -323,7 +317,7 @@ export class Workflow {
           rows.map((r, i) => node(`workflow-${section}-${i}`, "text", { text: `${r.label} · ${r.status}` })))];
     };
     return [this.#bar("usage", "Usage", "", !this.#usage),
-      node("workflow-usage-body", "text", { text: this.#usage, hidden: !this.#usage || !this.#expanded.usage }),
+      usageBody(this.#usage, this.#expanded.usage),
       this.#bar("plan", "Plan"),
       node("workflow-plan-body", "col", { gap: "sm", hidden: !this.#expanded.plan }, [
         node("workflow-file", "button", { text: this.#planPath ? `Open ${basename(this.#planPath)}` : "",

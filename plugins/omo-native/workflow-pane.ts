@@ -176,6 +176,10 @@ export function workflowCompanion(path: string, token: string, chat: string, win
          [data-id='workflow-detail-bar'] { align-items: center; justify-content: space-between; }
          [data-id='workflow-detail-close'] { color: var(--t2); }
          [data-id='workflow-layout'] { width: 100%; align-items: flex-start; gap: 0; }
+         [data-id='workflow-usage-split'] { align-items: center; }
+         [data-id='workflow-usage-chart'] { flex: none; width: auto; }
+         [data-id='workflow-usage-chart'] .leg { display: none; }
+         [data-id='workflow-usage-table'] { min-width: 0; }
          [data-id='workflow-fallback'] { width: 100%; overflow: hidden; }
          [data-id='workflow-graph'] { position: relative; width: 100%; overflow: hidden; }
          [data-id='workflow-edges'] { width: 100%; pointer-events: none; }

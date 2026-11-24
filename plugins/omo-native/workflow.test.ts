@@ -8,6 +8,7 @@ import { graph, supportsWorkflow, Workflow } from "./workflow";
 import { sessionPlanPath } from "./plan-link";
 import { record } from "./surface";
 import { workflowLayers, workflowSteps } from "./workflow-projection";
+import { workflowUsage } from "./workflow-usage";
 
 test("vertical DAG keeps a direct edge around the intermediate node", () => {
   const steps = [
@@ -293,14 +294,55 @@ test("usage ignores a stale reading and clears a foreign reading instead of carr
   const refresh = workflow.refreshUsage();
   const stats = (sessionId: string, total: number) => ({ sessionId: "route", data: { sessionId, tokens: { total } } });
   replies[1].resolve(stats("owner", 140)); await refresh;
-  expect(frames).toContainEqual(["set", "workflow-usage-body", { text: "140 tokens", hidden: false }]);
+  const visible = (hidden: boolean) => ["set", "workflow-usage-body", expect.objectContaining({ hidden })];
+  expect(frames).toContainEqual(visible(false));
+  expect(frames).toContainEqual(["set", "workflow-usage-table", expect.objectContaining({
+    rows: [{ id: "total", cells: { key: "Total tokens", value: "140" } }],
+  })]);
   frames.length = 0;
   replies[0].resolve(stats("owner", 888)); await Bun.sleep(0);
-  expect(JSON.stringify(frames)).not.toContain("888 tokens");
+  expect(JSON.stringify(frames)).not.toContain("888");
   const wrong = workflow.refreshUsage();
   replies[2].resolve(stats("neighbor", 999)); await wrong;
-  expect(frames).toContainEqual(["set", "workflow-usage-body", { text: "", hidden: true }]);
-  expect(JSON.stringify(frames)).not.toContain("999 tokens");
+  expect(frames).toContainEqual(visible(true));
+  expect(JSON.stringify(frames)).not.toContain("999");
+  workflow.action({ act: "fold", id: "workflow-usage" });
+  frames.length = 0;
+  const folded = workflow.refreshUsage();
+  replies[3].resolve(stats("owner", 2468)); await folded;
+  expect(frames).toContainEqual(visible(true));
+  frames.length = 0;
+  workflow.action({ act: "fold", id: "workflow-usage" });
+  expect(frames).toContainEqual(visible(false));
+  expect(JSON.stringify(frames)).toContain('"value":"2.47k"');
+  const closed = workflow.refreshUsage();
+  workflow.toggle(); frames.length = 0;
+  replies[4].resolve(stats("owner", 123)); await closed;
+  expect(frames).toEqual([]);
+});
+
+test("workflow composition uses reported categories; context and total are independent", () => {
+  const contextUsage = { tokens: 0, contextWindow: 128000 };
+  const usage = workflowUsage({ tokens: { total: 1000000, input: 999, cacheRead: 0, cacheWrite: -1, output: 1.5 }, contextUsage });
+  expect(usage?.rows.map(row => [row.id, row.cells.value])).toEqual([["total", "1M"], ["input", "999"], ["cacheRead", "0"]]);
+  expect(usage?.series.map(s => s.value)).toEqual([999, 0]);
+  expect(usage?.center).toBeUndefined();
+  expect(workflowUsage({ contextUsage })?.context).toEqual({ label: "Context  0 / 128k", value: 0 });
+  expect(workflowUsage({ tokens: { input: "42" }, contextUsage: { tokens: 10, contextWindow: 0 } })).toBeUndefined();
+  expect(workflowUsage({ tokens: { total: 14000, input: 9000, output: 2000, cacheRead: 3000, cacheWrite: 0 },
+    contextUsage: { tokens: 3000, contextWindow: 12000 } })).toMatchObject({ center: "14k", context: { value: 0.25 } });
+});
+
+test("workflow USD is reported, never inferred from tokens or rounded to a false zero", () => {
+  const price = (stats: RpcRecord) => workflowUsage(stats)?.rows.find(row => row.id === "cost")?.cells;
+  for (const cost of [undefined, null, "1", -1, NaN, Infinity]) expect(price({ cost })).toBeUndefined();
+  for (const cost of [0, -0]) expect(price({ cost })).toEqual({ key: "Cost (USD)", value: "$0.00" });
+  expect(price({ cost: 0.165 })).toEqual({ key: "Cost (USD)", value: "$0.165" });
+  expect(price({ cost: 0.000065 })).toEqual({ key: "Cost (USD)", value: "$0.000065" });
+  expect(price({ cost: 1e-10 })).toEqual({ key: "Cost (USD)", value: "<$0.000001" });
+  expect(price({ cost: 0, costUnknown: true })).toEqual({ key: "Cost (USD)", value: "Unknown" });
+  expect(price({ cost: 0.165, costUnknown: true })).toEqual({ key: "Known cost (USD)", value: "$0.165" });
+  expect(price({ cost: 0, costUnknown: "true" })).toBeUndefined();
 });
 
 test("attributes a skip only to failed or cancelled ancestors reachable through skipped nodes", () => {
