@@ -56,7 +56,8 @@ Open the command palette, search for `OMO`, and select **OMO: New Session**. The
 
 - **Enter** sends the draft. **Shift+Enter** inserts a newline. Pasting text doesn't send it.
 - Paste a copied local file or clipboard image into the composer on a Tern host with rich clipboard paste. A typed or plain-text path stays text. PNG, JPEG, GIF and WebP images show thumbnails and are sent as image data when the selected model accepts images. Other files appear by name, type and size but cannot be sent by OmO's image-only attachment RPC. Remove them with **×** before sending; nothing is run or unpacked. The composer accepts up to six items and 4 MiB of images per message. Thumbnails require Bun's image API and are limited to source images of at most 16 megapixels.
-- At the start of an idle draft, type `/` and part of a name to find commands from this session. Use the arrow keys and Enter, or click a command, to insert it. Edit its arguments, then press Enter to send. Escape closes the list without clearing the draft. The list does not add terminal-only commands or dollar-syntax skills. If the engine does not provide a list, type and send as usual.
+- At the start of an idle draft, type `/` and part of a name. Use the arrow keys and Enter, or tap a command. OmO extension commands and prompt templates are inserted for editing; native session commands run locally without sending a model prompt. Escape closes the list without clearing the draft.
+- The native session commands are `/new`, `/resume` (also `/sessions`), `/rename` (also `/name`), `/session`, `/tree`, `/fork`, and `/clone`. `/resume`, `/tree`, and `/fork` open pickers. Use `/rename My session` to supply a name directly. Export, import, and sharing from the terminal UI are not provided by this plugin.
 - During a running turn, **Cmd+Enter** steers the turn and **Ctrl+Enter** queues the draft as a follow-up. Plain **Enter** leaves the draft in place while a turn is running.
 - Click a tool card's header to expand or collapse it. **Ctrl+O** toggles the tool cards as a group.
 - Press **Escape** in the chat or click the square **Stop turn** icon to stop the current turn. Stopping preserves an unsent draft and does not cancel the session's background jobs. Status badges and the spinner appear above the composer without moving the editor. The spinner stays visible while the main turn or session-owned background work is running.
@@ -110,6 +111,8 @@ When OmO reports current subscription quota for the account this session uses, a
 ## Reopen a saved session
 
 From a terminal or agent pane in the original project, choose **OMO: Resume Session** in the palette. It opens the picker in a separate tab. No OmO session starts while you browse. The picker lists saved local sessions whose recorded working directory resolves to this project, newest first. Worker sessions and files without any saved entries are excluded.
+
+On mobile, use the same **OMO: New Session** and **OMO: Resume Session** palette commands with the plugin available to the client and installed on the connected Tern host. To switch within an existing chat, use `/resume`; cancelling leaves the existing chat and draft unchanged.
 
 Type to filter by title, filename, or displayed date. Use the same row controls as the model picker, then press **Enter** or click **Resume**. The plugin rechecks the file and working directory before opening the transcript. If the file is gone, click **Reload** to refresh the list. **Escape** or **Cancel** exits this launcher without opening a session.
 

@@ -1,16 +1,16 @@
 import { RpcCommandError, RpcTransportError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, plain, record, string, type Op } from "./surface";
+import { sessionCommand, sessionCommands } from "./session-commands";
 
 type Source = Pick<OmoRpc, "sessionId" | "request">;
 type Command = { readonly name: string; readonly description: string; readonly source: string };
 const token = /^[\p{L}\p{N}_:-][\p{L}\p{N}_.:-]*$/u;
 
 function catalog(value: unknown): Command[] {
-  if (!Array.isArray(value)) return [];
-  const commands = new Map<string, Command>();
-  for (const raw of value) {
+  const commands = new Map<string, Command>(sessionCommands.map(row => [row.name, row]));
+  for (const raw of Array.isArray(value) ? value : []) {
     const { name, description, source, syntax } = record(raw);
-    if (typeof name !== "string" || !token.test(name) || commands.has(name)) continue;
+    if (typeof name !== "string" || !token.test(name) || commands.has(name) || sessionCommand(`/${name}`)) continue;
     if (syntax !== "slash" && !(syntax === undefined && (source === "extension" || source === "prompt"))) continue;
     commands.set(name, { name, description: plain(string(description)), source: plain(string(source)) });
   }
@@ -22,7 +22,7 @@ export class SlashMenu {
   #source?: Source;
   #version = 0;
   #revision = 0;
-  #rows: Command[] = [];
+  #rows = catalog(undefined);
   #matches: Command[] = [];
   #index = 0;
   #query?: string;
@@ -31,7 +31,7 @@ export class SlashMenu {
   constructor(private readonly frame: (...ops: Op[]) => void) {}
 
   async bind(source: Source) {
-    this.close(); this.#source = source; this.#rows = [];
+    this.#source = source; this.#rows = catalog(undefined); this.#filter();
     const version = ++this.#version;
     let reply: RpcRecord;
     try {
@@ -83,7 +83,7 @@ export class SlashMenu {
     this.buttons = rows.map(({ name }, i) => ({ id: `slash-option-${revision}-${i}`, name }));
     if (!rows.length) return;
     this.frame(add("dialogs", node("slash-menu", "col", { gap: "xs" }, [
-      node("slash-hint", "text", { text: `Commands · ${this.#index + 1}/${this.#matches.length} · ↑↓ choose · Enter insert · Esc close` }),
+      node("slash-hint", "text", { text: `Commands · ${this.#index + 1}/${this.#matches.length} · ↑↓ choose · Enter select · Esc close` }),
       ...rows.map((row, i) => node(this.buttons[i].id, "button", {
         text: `/${row.name}`, title: [row.source, row.description].filter(Boolean).join(" · "),
         variant: first + i === this.#index ? "primary" : "quiet", actions: { click: "insert-command" },

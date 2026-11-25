@@ -10,16 +10,11 @@ local owned: { [number]: boolean } = {}
 
 local function launch(id: string, title: string, args: string)
     tern.command({ id = id, title = title, run = function(cx)
-        if cx.hosts:current().kind ~= "local" then
-            cx:toast("error", "OMO Native is only available in local sessions.")
-            return
-        end
-
         local focused = cx.session:focused()
         local pane = if focused then cx.session:pane(focused) else nil
         local cwd = if pane and (pane.kind == "terminal" or pane.kind == "agent") then pane.cwd else nil
         local launched = cx.layout:new_tab({
-            command = command .. args,
+            command = (if cx.hosts:current().kind == "local" then command else "omo-native") .. args,
             cwd = if cwd ~= "" then cwd else nil,
         })
         if launched then

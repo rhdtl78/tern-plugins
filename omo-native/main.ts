@@ -8,6 +8,7 @@ import { Transcript } from "./transcript";
 import omoIcon from "./omo-icon.svg" with { type: "text" };
 import { dialog } from "./dialog";
 import { resumeFields, sessionActivity } from "./session";
+import { entryRows, sessionCommand } from "./session-commands";
 import { listSavedSessions } from "./history";
 import { Picker, savedRows, selectedSession } from "./picker";
 import { SessionSettings, settingAction, settingsCss, settingsDisabled, settingsNode } from "./model-settings";
@@ -33,6 +34,8 @@ let workflowLaunch: AbortController | undefined;
 let workflowLifetime: Promise<void> | undefined;
 const workflow = new Workflow((...ops) => workflowFrame?.(...ops));
 let transcript: Transcript;
+let authorIcon: string | undefined;
+const transcriptNodes = new Set<string>();
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
 let background: ActivityProjection | undefined, quota: UsageMeter | undefined;
@@ -232,7 +235,9 @@ function onRpc(e: RpcRecord) {
   void quota?.event(e);
   if (ready && rpc && !settings.applying &&
       (e.type === "model_changed" || e.type === "thinking_level_changed" || e.type === "service_tier_changed")) {
-    if (picker && picker.kind !== "sessions") { removePicker(); refresh(); }
+    if (picker && (picker.kind === "models" || picker.kind === "tiers" || picker.kind === "thinking")) {
+      removePicker(); refresh();
+    }
     void settings.observed(rpc, e);
   }
   if (background?.observe(e)) {
@@ -265,13 +270,23 @@ function onRpc(e: RpcRecord) {
   }
   if (welcome && transcript.populated) refresh();
 }
+const welcomeCard = () => node("welcome", "card", { role: "omp.welcome" }, [
+  node("wordmark", "text", { role: "omp.welcome.wordmark", spans: [{ t: "OMO", s: "strong" }] }),
+  node("hint", "text", { role: "omp.welcome.tip-text", text: "Enter to send · Shift+Enter for a new line" }),
+]);
+function makeTranscript() {
+  return new Transcript((...ops) => {
+    for (const [verb, id, parent] of ops)
+      if (verb === "add" && parent === "main" && typeof id === "string") transcriptNodes.add(id);
+    frame(...ops);
+  }, phases => workflow.todo(phases), authorIcon);
+}
 async function start(hello: RpcRecord) {
   live = true; screen.negotiate(hello);
   quotaAvailable = supportsUsage(hello);
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
-  let authorIcon: string | undefined;
   previews = Array.isArray(hello.features) && hello.features.includes("blobs") &&
     Array.isArray(hello.kinds) && hello.kinds.includes("image");
   if (previews) {
@@ -279,18 +294,13 @@ async function start(hello: RpcRecord) {
     authorIcon = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
     process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
   }
-  transcript = new Transcript(frame, phases => workflow.todo(phases), authorIcon);
+  transcript = makeTranscript();
   screen.send("s", { sf: surface, name: "omo-composer", css: `
     ${composerCss}
     ${settingsCss}
   ` });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
-  frame(add(surface, node("main", "col", {}, [
-    node("welcome", "card", { role: "omp.welcome" }, [
-      node("wordmark", "text", { role: "omp.welcome.wordmark", spans: [{ t: "OMO", s: "strong" }] }),
-      node("hint", "text", { role: "omp.welcome.tip-text", text: "Enter to send · Shift+Enter for a new line" }),
-    ]),
-  ])), add(surface, node("dock", "col", {}, [
+  frame(add(surface, node("main", "col", {}, [welcomeCard()])), add(surface, node("dock", "col", {}, [
     node("dialogs", "col"),
     node("pending-messages", "scroll", { hidden: true, max: { h: "6lines" } }),
     node("composer", "col", { role: "omp.editor" }, [
@@ -340,6 +350,13 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (closing) return;
     const history = await client.getMessages();
     if (closing) return;
+    ownSession(client, sessionId, state, history);
+    if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
+    pending.forEach(onRpc);
+    void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
+    await slash.bind(client);
+}
+function ownSession(client: OmoRpc, sessionId: string, state: RpcRecord, history: readonly RpcRecord[]) {
     const owner = string(state.sessionId);
     if (workflowAvailable) workflow.bind(client, owner, string(state.cwd) || cwd);
     if (owner) {
@@ -358,13 +375,44 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (quotaAvailable) quota = new UsageMeter(client, renderUsage(screen));
     for (const message of history) transcript.message(message);
     busy = state.isStreaming === true; ready = true; status = "";
-    showPending(state.ordered);
+    showPending(state.ordered ?? []);
     settings.show(state);
     frame(["focus", "draft"]);
+}
+async function reloadSession(client: OmoRpc, text: string, replaced: boolean) {
+  const state = await client.getState(), history = await client.getMessages();
+  if (closing || !ready || !client.sessionId) return;
+  frame(...[...transcriptNodes].map(id => ["del", id]));
+  transcriptNodes.clear();
+  if (!welcome) frame(add("main", welcomeCard()));
+  welcome = true;
+  transcript = makeTranscript();
+  draft.reset(text);
+  composerMode.clear();
+  if (replaced) {
+    background = undefined;
+    quota?.close(); quota = undefined;
+    workflow.disconnect();
+    settings.invalidate();
+    ownSession(client, client.sessionId, state, history);
     if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
-    pending.forEach(onRpc);
-    void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
-    await slash.bind(client);
+    void slash.bind(client).catch(error => notify(why(error), "error"));
+  } else {
+    workflow.todo([]);
+    for (const message of history) transcript.message(message);
+    refresh();
+  }
+}
+// After a committed engine change, don't let the old transcript keep driving
+// the new session if validation or reconstruction fails.
+async function restoreAfterChange(client: OmoRpc, text: string, replaced: boolean, verify?: () => Promise<unknown>) {
+  try {
+    await verify?.();
+    await reloadSession(client, text, replaced);
+  } catch (error) {
+    if (!closing) fail(error);
+    await client.close();
+  }
 }
 function removePicker() {
   if (!picker) return;
@@ -383,30 +431,57 @@ async function loadPicker(p: Picker) {
   frame(["set", p.id, p.props()]);
   try {
     if (p.kind === "sessions") p.load(savedRows(await listSavedSessions(cwd)));
-    else if (rpc) p.load(await settings.choices(rpc, p.kind));
+    else if (p.kind === "rename") p.load([]);
+    else if (rpc) {
+      const kind = p.kind;
+      switch (kind) {
+        case "fork": case "tree":
+          p.load(entryRows(kind, (await rpc.request(kind === "fork" ? "get_fork_messages" : "get_tree")).data));
+          break;
+        case "models": case "tiers": case "thinking":
+          p.load(await settings.choices(rpc, kind));
+          break;
+      }
+    }
   } catch (e) { p.state = "error"; p.message = why(e); }
   if (picker === p && !closing) frame(["set", p.id, p.props(true)]);
 }
 async function choose(p: Picker) {
   const target = p.choice?.target;
-  if (!target || p.applying) return;
+  if (!p.usable || p.applying) return;
   const client = rpc;
-  if (!("path" in target) && (!ready || !client || busy || submitting || stopping || ask || settings.applying)) {
+  if (ready ? !client || busy || submitting || stopping || ask || settings.applying : p.kind !== "sessions") {
     removePicker(); refresh(); return;
   }
   p.applying = true; p.state = "loading";
   frame(["set", p.id, p.props()]);
   try {
-    if ("path" in target) {
+    if (target && "path" in target) {
       const { fields, verify } = await selectedSession(target, cwd);
       if (closing || picker !== p) return;
+      if (ready && client) {
+        const { data } = await client.request("switch_session", { sessionPath: fields.sessionPath });
+        if (record(data).cancelled !== true) await restoreAfterChange(client, "", true, verify);
+        if (p === picker) { removePicker(); refresh(); }
+        return;
+      }
       removePicker(); showStatus("Opening session…");
       try { await openSession(fields, verify); }
       catch (e) { if (!closing) fail(e); await rpc?.close(); }
       return;
     }
     if (!client) throw new Error("No active OmO session");
-    await settings.apply(client, target);
+    if (p.kind === "rename") {
+      await client.request("set_session_name", { name: p.query.trim() });
+      draft.reset(""); notify("Session renamed.");
+    } else if (target && "entryId" in target) {
+      const fork = p.kind === "fork";
+      const reply = record((await client.request(fork ? "fork" : "navigate_tree", target)).data);
+      if (reply.cancelled !== true && reply.outcome !== "cancelled")
+        await restoreAfterChange(client, string(fork ? reply.text : reply.editorText), fork);
+    } else if (target) {
+      await settings.apply(client, target);
+    }
     if (closing || !ready) return;
     if (p === picker) removePicker();
     refresh();
@@ -423,15 +498,45 @@ function pickerInput(p: Picker, i: Input) {
     case "retry": void loadPicker(p); break;
     case "close":
       removePicker();
-      if (p.kind === "sessions") void close(); else refresh();
+      if (p.kind === "sessions" && !ready) void close(); else refresh();
       break;
   }
+}
+async function runSessionCommand(command: NonNullable<ReturnType<typeof sessionCommand>>) {
+  if (!rpc || !ready || ask || picker || busy || stopping || submitting || settings.applying) return;
+  if (pasting || clipboard.pending) { notify("Wait for the paste to finish."); return; }
+  if (attachments.size) { notify("Send attachments with a message, not a slash command.", "error"); return; }
+  const client = rpc;
+  const { name, argument } = command;
+  if (name === "resume" || name === "sessions") { openPicker("sessions"); return; }
+  if (name === "fork" || name === "tree") { openPicker(name); return; }
+  if ((name === "rename" || name === "name") && !argument) { openPicker("rename"); return; }
+  submitting = true; refresh();
+  try {
+    if (name === "session") {
+      const stats = record((await client.request("get_session_stats")).data);
+      notify(`Session ${string(stats.sessionId)} · ${Number(stats.totalMessages) || 0} messages · ${Number(record(stats.tokens).total) || 0} tokens`);
+      draft.reset("");
+    } else if (name === "name" || name === "rename") {
+      await client.request("set_session_name", { name: argument });
+      notify("Session renamed."); draft.reset("");
+    } else {
+      const { data } = await client.request(name === "new" ? "new_session" : "clone");
+      if (record(data).cancelled !== true) await restoreAfterChange(client, "", true);
+    }
+  } catch (error) { notify(why(error), "error"); }
+  finally { submitting = false; if (!closing) refresh(); }
 }
 async function submit(mode: SubmitMode, supplied?: string) {
   const text = supplied ?? editor.text;
   if (ask) { if (mode === "prompt" && ask.typed && text.trim()) await answer(ask.typed(text)); return; }
   if (!ready || !rpc || picker || submitting || stopping || settings.applying || (!text.trim() && !attachments.size)) return;
   if (pasting || clipboard.pending) { notify("Wait for the paste to finish."); return; }
+  const command = sessionCommand(text);
+  if (command) {
+    if (mode === "prompt" && !busy) await runSessionCommand(command);
+    return;
+  }
   if (mode === "prompt" && busy) {
     if (supplied === undefined) notify("Turn running. Use ⌘+Enter to steer or Ctrl+Enter to queue.");
     return;
@@ -554,6 +659,8 @@ function insertCommand(id?: unknown) {
   if (!ready || busy || stopping || submitting || ask || picker) return;
   const text = slash.pick(id);
   if (!text) return;
+  const local = sessionCommand(text);
+  if (local) { void runSessionCommand(local); return; }
   draft.replaceDraft(text);
   frame(["focus", "draft"]); refresh();
 }
