@@ -39,6 +39,7 @@ export function entryRows(kind: "fork" | "tree", data: unknown) {
           detail: "User", target: { entryId } });
     }
   } else {
+    const { leafId } = value;
     const stack = (Array.isArray(value.tree) ? value.tree : []).slice().reverse().map(node => ({ node, depth: 0 }));
     while (stack.length) {
       const { node, depth } = stack.pop()!;
@@ -49,8 +50,8 @@ export function entryRows(kind: "fork" | "tree", data: unknown) {
       const entryId = string(entry.id);
       if (entryId)
         rows.push({ id: `e${rows.length}`, label: plain(text).slice(0, 160) || role,
-          detail: `${"› ".repeat(Math.min(depth, 8))}${role}`, current: entryId === value.leafId,
-          target: { entryId, expectedLeafId: typeof value.leafId === "string" ? value.leafId : null } });
+          detail: `${"› ".repeat(Math.min(depth, 8))}${role}`, current: entryId === leafId,
+          target: typeof leafId === "string" ? { entryId, expectedLeafId: leafId } : { entryId } });
       if (Array.isArray(children))
         for (let i = children.length - 1; i >= 0; i--) stack.push({ node: children[i], depth: depth + 1 });
     }

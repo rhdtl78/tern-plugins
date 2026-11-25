@@ -6,7 +6,7 @@ import { listedHeader, type SavedSession, type SavedTarget } from "./history";
 
 type Row = {
   readonly id: string; readonly label: string; readonly detail: string; readonly current?: boolean;
-  readonly target: Setting | SavedTarget | { readonly entryId: string; readonly expectedLeafId?: string | null };
+  readonly target: Setting | SavedTarget | { readonly entryId: string; readonly expectedLeafId?: string };
 };
 
 const labels = {

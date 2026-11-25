@@ -185,6 +185,16 @@ test("native rename and branch choices provide only their intended arguments", (
     .toEqual({ entryId: "base" });
 });
 
+test("tree choice sends no leaf fence at the session root", () => {
+  const tree = new Picker("tree", "branches");
+  tree.load(entryRows("tree", { leafId: null, tree: [{
+    entry: { id: "base", type: "message", message: { role: "user", content: "Original prompt" } },
+    children: [],
+  }] }));
+  expect(tree.input({ kind: "event", value: { id: "branches", ev: "activate", item: "e0" } })).toBe("use");
+  expect(tree.choice?.target).toStrictEqual({ entryId: "base" });
+});
+
 test("resume rejects deleted, replaced, redirected and foreign-cwd saved rows", async () => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "picker-")));
   const path = join(dir, "saved.jsonl"), other = join(dir, "other.jsonl");
