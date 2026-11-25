@@ -158,8 +158,8 @@ function onRpc(e: RpcRecord) {
   const active = sessionActivity(e.type);
   if (active !== undefined) {
     activity++;
-    if (!active) { void workflow.refreshPlan(); void workflow.refreshUsage(); }
-    if (active) removePicker();
+    if (active) { transcript.startTurn(); removePicker(); }
+    else { transcript.finishTurn(); void workflow.refreshPlan(); void workflow.refreshUsage(); }
     if (active !== busy || active) { busy = active; showStatus(stopping ? "Stopping…" : ""); }
     return;
   }
@@ -351,6 +351,7 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (quotaAvailable) quota = new UsageMeter(client, renderUsage(screen));
     for (const message of history) transcript.message(message);
     busy = state.isStreaming === true; ready = true; status = "";
+    if (busy) transcript.startTurn();
     showModel(state.model);
     frame(["focus", "draft"]);
     refresh();
@@ -475,7 +476,7 @@ async function stop() {
   try {
     const reply = await rpc.abort({ intent: "stop", awaitIdle: true });
     if (record(reply.data).idle === true) {
-      if (startedAt === activity) { busy = false; composerMode.clear(); }
+      if (startedAt === activity) { transcript.finishTurn(); busy = false; composerMode.clear(); }
       if (!busy) notify("Stopped");
     } else if (busy) notify("Stop requested. The turn is still running.");
   } catch (e) {
@@ -567,6 +568,7 @@ function handle(i: Input) {
         }
         return;
       case "action":
+        if (e.act === "toggle-turn-activity") { transcript.toggleActivity(string(e.id)); return; }
         if (e.act === "insert-command" && typeof e.id === "string") { insertCommand(e.id); return; }
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
         if (e.id === "model" && e.act === "models") openPicker("models");

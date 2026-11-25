@@ -30,7 +30,7 @@ Open the command palette, search for `OMO`, and select **OMO: New Session**. The
 - **Enter** sends the draft. **Shift+Enter** inserts a newline. Pasting text doesn't send it.
 - At the start of an idle draft, type `/` and part of a name to find commands from this session. Use the arrow keys and Enter, or click a command, to insert it. Edit its arguments, then press Enter to send. Escape closes the list without clearing the draft. The list does not add terminal-only commands or dollar-syntax skills. If the engine does not provide a list, type and send as usual.
 - During a running turn, **Cmd+Enter** steers the turn and **Ctrl+Enter** queues the draft as a follow-up. Plain **Enter** leaves the draft in place while a turn is running.
-- Click a tool card's header to expand or collapse it. **Ctrl+O** toggles the tool cards as a group.
+- Click a tool card's header to expand or collapse it. When a turn finishes, its intermediate activity folds automatically; your messages and OMO's final reply stay visible. Click **Show turn activity** to view the calls and results in order, or **Hide turn activity** to fold them again. **Ctrl+O** toggles activity groups and ungrouped tool cards together.
 - Press **Escape** in the chat or click the square **Stop turn** icon to stop the current turn. Stopping preserves an unsent draft and does not cancel the session's background jobs. Status badges and the spinner appear above the composer without moving the editor. The spinner stays visible while the main turn or session-owned background work is running.
 - Press **Ctrl+D** to close the OmO session gracefully and restore the terminal's input settings.
 

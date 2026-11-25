@@ -44,6 +44,9 @@ export function todoPhases(details: unknown): readonly ChecklistPhase[] | undefi
   return checklist;
 }
 
+type TurnRecord = { readonly id: string; readonly assistant: boolean };
+type TurnGroup = { readonly records: readonly TurnRecord[]; collapsed: boolean };
+
 /** History and live tool events share one identity per call, including its disclosure. */
 export class Transcript {
   #seq = 0;
@@ -51,19 +54,64 @@ export class Transcript {
   #blocks = new Map<number, string>();
   #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; checklist: boolean }>();
   #folds = new Map<string, boolean>();
+  #turn: TurnRecord[] | undefined;
+  #groups = new Map<string, TurnGroup>();
   constructor(private readonly frame: (...ops: Op[]) => void,
     private readonly onTodo?: (phases: readonly ChecklistPhase[]) => void,
     private readonly authorIcon?: string) {}
   #seenTodo = new Set<string>();
   get populated() { return this.#seq !== 0; }
 
-  fold(id: string, collapsed: boolean) { if (this.#folds.has(id)) this.#folds.set(id, collapsed); }
-  flipTools() {
-    const collapse = [...this.#folds.values()].some(folded => !folded);
-    for (const id of this.#folds.keys()) {
-      this.#folds.set(id, collapse);
-      this.frame(["set", id, { collapsed: collapse }]);
+  startTurn() { this.#turn ??= []; }
+  finishTurn() {
+    const records = this.#turn;
+    this.#turn = undefined;
+    if (!records?.length) return;
+    const id = this.#summaryId(records[0]!.id);
+    // Only a trailing assistant message is the reply; tool-bearing steps are intermediate.
+    if (records.at(-1)?.assistant) records.pop();
+    if (!records.length) { this.frame(["del", id]); return; }
+    const group = { records, collapsed: true };
+    this.#groups.set(id, group);
+    this.#showGroup(id, group, true);
+  }
+  #summaryId(first: string) { return `activity-${first}`; }
+  #record(id: string, assistant: boolean) {
+    if (!this.#turn) return;
+    if (!this.#turn.length) this.frame(add("main", node(this.#summaryId(id), "button", {
+      hidden: true, variant: "quiet", actions: { click: "toggle-turn-activity" },
+    })));
+    this.#turn.push({ id, assistant });
+  }
+  toggleActivity(id: string) {
+    const group = this.#groups.get(id);
+    if (group) this.#showGroup(id, group, !group.collapsed);
+  }
+  #showGroup(id: string, group: TurnGroup, collapsed: boolean) {
+    group.collapsed = collapsed;
+    const label = `${collapsed ? "Show" : "Hide"} turn activity (${group.records.length})`;
+    this.frame(["set", id, { hidden: false, text: `${collapsed ? "▸" : "▾"} ${label}`, aria: label }]);
+    for (const item of group.records) {
+      this.frame(["set", item.id, { hidden: collapsed }]);
+      if (!collapsed && !item.assistant) this.#setToolFold(item.id, false);
     }
+  }
+  fold(id: string, collapsed: boolean) { if (this.#folds.has(id)) this.#folds.set(id, collapsed); }
+  #setToolFold(id: string, collapsed: boolean) {
+    this.#folds.set(id, collapsed);
+    this.frame(["set", id, { collapsed }]);
+  }
+  flipTools() {
+    const ungrouped = new Map(this.#folds);
+    for (const group of this.#groups.values()) {
+      for (const { id } of group.records) ungrouped.delete(id);
+    }
+    const collapse = [...this.#groups.values()].some(group => !group.collapsed)
+      || [...ungrouped.values()].some(folded => !folded);
+    for (const [id, group] of this.#groups) {
+      if (group.collapsed !== collapse) this.#showGroup(id, group, collapse);
+    }
+    for (const id of ungrouped.keys()) this.#setToolFold(id, collapse);
   }
   #tool(call: string, name: string, input: { readonly args: RpcRecord; readonly status: string; readonly result?: RpcRecord | undefined }) {
     if (!call) return;
@@ -88,6 +136,7 @@ export class Transcript {
     if (!tool) {
       this.#tools.set(call, { id, name, args, checklist: !!phases?.length });
       this.#folds.set(id, collapsed);
+      this.#record(id, false);
       const target = plain(string(args.path) || string(args.command) || string(args.query));
       this.frame(add("main", node(id, "tool", {
         name: plain(name), title: plain(name) || "Tool", target, targetKind: args.path ? "path" : args.command ? "command" : "text",
@@ -118,7 +167,7 @@ export class Transcript {
       return;
     }
     const id = `m${++this.#seq}`;
-    if (assistant) this.#assistant = id;
+    if (assistant) { this.#assistant = id; this.#record(id, true); }
     const avatar = assistant && this.authorIcon ? node(id + ".author", "image", {
       blob: this.authorIcon, alt: "OMO", actions: { click: "ignore" },
     }) : undefined;

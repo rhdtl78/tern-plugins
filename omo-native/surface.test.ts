@@ -114,6 +114,66 @@ test("restored calls and result events share a disclosure and keep output litera
   expect(ops.at(-1)).toEqual(["set", ops[1]?.[1], { collapsed: false }]);
 });
 
+test.each(["agent_settled", "agent_idle"])("turn activity folds only on %s and stays open across later turns", end => {
+  const ops: Op[] = [];
+  const t = new Transcript((...o) => ops.push(...o));
+  const event = (type: string) => {
+    const active = sessionActivity(type);
+    if (active === true) t.startTurn();
+    else if (active === false) t.finishTurn();
+    else t.event({ type });
+  };
+  const user = (content: string) => t.message({ role: "user", content });
+  const answer = (content: string) => t.message({ role: "assistant", content });
+  const call = (id: string, name: string, text: string) => {
+    t.message({ role: "assistant", content: [{ type: "toolCall", id, name }] });
+    t.event({ type: "tool_execution_end", toolCallId: id, toolName: name,
+      result: { content: [{ type: "text", text }] } });
+  };
+  user("First request");
+  event("agent_start");
+  answer("Intermediate text");
+  call("first", "read", "first result");
+  event("agent_end");
+  event("auto_retry_start");
+  event("agent_start");
+  user("Steering message");
+  call("second", "grep", "second result");
+  answer("Final response");
+  event("agent_end");
+  const transcriptOrder = ops.filter(o => o[0] === "add" && o[2] === "main").map(o => o[1]);
+  expect(transcriptOrder).toEqual(["m1", "activity-m2", "m2", "t3", "m4", "t5", "m6"]);
+  expect(ops.filter(o => o[0] === "set" && (o[2] as Record<string, unknown>).hidden !== undefined)).toEqual([]);
+  ops.length = 0;
+  event(end);
+  expect(ops.slice(1)).toEqual(["m2", "t3", "t5"].map(id => ["set", id, { hidden: true }]));
+  ops.length = 0;
+  t.toggleActivity("activity-m2");
+  expect(ops.slice(1)).toEqual([
+    ["set", "m2", { hidden: false }],
+    ["set", "t3", { hidden: false }], ["set", "t3", { collapsed: false }],
+    ["set", "t5", { hidden: false }], ["set", "t5", { collapsed: false }],
+  ]);
+  t.toggleActivity("activity-m2");
+  expect(ops.at(-1)).toEqual(["set", "t5", { hidden: true }]);
+  t.toggleActivity("activity-m2");
+  ops.length = 0;
+  event(end); // Some engines report both settlement and idle.
+  expect(ops).toEqual([]);
+  event("agent_start");
+  user("Next request");
+  call("third", "read", "third result");
+  answer("Next response");
+  event(end);
+  expect(ops.at(-1)).toEqual(["set", "t8", { hidden: true }]);
+  expect(ops.some(o => o[0] === "set" && ["activity-m2", "m2", "t3", "t5"].includes(String(o[1])))).toBe(false);
+  ops.length = 0;
+  event("agent_start");
+  answer("Plain reply");
+  event(end);
+  expect(ops.at(-1)).toEqual(["del", "activity-m10"]);
+});
+
 test.each([
   ["malformed", [null], "print('hello');", ["\n  print('hello');\nprint('world');"]],
   ["output-only", [{ output: "**Failed**" }], "print('hello');", ["\n  print('hello');\nprint('world');"]],
