@@ -1,9 +1,32 @@
 import { expect, test } from "bun:test";
 import { SlashMenu } from "./slash";
+import { sessionCommand } from "./session-commands";
 import { RpcCommandError, RpcTransportError } from "./rpc";
 import type { Op } from "./surface";
 
 const command = (name: string, source = "extension", syntax = "slash") => ({ name, source, syntax });
+
+test.each([
+  "/new\nPlease keep this paragraph",
+  "/clone\r\nDraft to preserve",
+  "/resume this paragraph",
+  "/session\n",
+  "/rename\nDraft to preserve",
+  "/name First\u2028Second",
+])("session command parsing leaves %j for normal submission", (draft) => {
+  expect(sessionCommand(draft)).toBeUndefined();
+});
+
+test.each([
+  [" /NEW \t", "new", ""],
+  ["/resume ", "resume", ""],
+  ["/rename", "rename", ""],
+  ["/rename  Fixture name ", "rename", "Fixture name"],
+  ["/NAME\tOther name", "name", "Other name"],
+])("session command parsing recognizes %j as local intent", (draft, name, argument) => {
+  expect(sessionCommand(draft)).toEqual({ name, argument });
+});
+
 function setup() {
   const frames: Op[] = [];
   const menu = new SlashMenu((...ops) => frames.push(...ops));

@@ -18,10 +18,14 @@ export const sessionCommands = Object.entries(commands).map(([name, description]
 }));
 
 export function sessionCommand(text: string) {
-  const match = /^\/([\w-]+)(?:\s+([\s\S]*))?$/u.exec(text.trim());
+  // Check before trimming: even a trailing newline belongs to the draft.
+  if (/[\r\n\u2028\u2029]/u.test(text)) return;
+  const match = /^\/([\w-]+)(?:\s+(.+))?$/u.exec(text.trim());
   const name = match?.[1].toLowerCase();
   if (!name || !Object.hasOwn(commands, name)) return;
-  return { name: name as SessionCommand, argument: match?.[2]?.trim() ?? "" };
+  const argument = match?.[2] ?? "";
+  if (argument && name !== "name" && name !== "rename") return;
+  return { name: name as SessionCommand, argument };
 }
 
 export function entryRows(kind: "fork" | "tree", data: unknown) {
