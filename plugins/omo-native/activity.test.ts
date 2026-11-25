@@ -58,11 +58,16 @@ function panelFixture() {
       if (action === "set" && n) Object.assign(n.p, record(p));
     }
   };
-  const workflow = new Workflow(frame), activity = make();
+  const dagMounted = Promise.withResolvers<void>();
+  const workflow = new Workflow((...ops) => {
+    frame(...ops);
+    if (nodes.has("workflow-step-0")) dagMounted.resolve();
+  }), activity = make();
   const pushView = () => workflow.background(activity.view);
-  return { workflow, activity, pushView, props: (id: string) => nodes.get(`workflow-${id}`)?.p,
+  return { workflow, activity, pushView, dagMounted: dagMounted.promise, props: (id: string) => nodes.get(`workflow-${id}`)?.p,
     kind: (id: string) => nodes.get(`workflow-${id}`)?.kind,
-    sections: () => (order.get("workflow") ?? []).filter(id => /^(?:workflow-(?:dag|activity)-bar|workflow-(?:agents|jobs)-body)$/.test(id)) };
+    sections: () => (order.get("workflow") ?? []).filter(id =>
+      /^(?:workflow-content|workflow-(?:dag|activity)-bar|workflow-(?:agents|jobs)-body)$/.test(id)) };
 }
 
 test("owner activity badges count work rather than capped rows", () => {
@@ -93,9 +98,15 @@ test("owner activity badges count work rather than capped rows", () => {
   expect(props("jobs-0")).toBeUndefined();
 });
 
-test("Background Activity folds both groups without giving their headings a fold action", () => {
-  const { workflow, activity, pushView, props, kind, sections } = panelFixture();
-  const expectedOrder = ["workflow-dag-bar", "workflow-activity-bar", "workflow-agents-body", "workflow-jobs-body"];
+test("Background Activity folds both groups without giving their headings a fold action", async () => {
+  const { workflow, activity, pushView, dagMounted, props, kind, sections } = panelFixture();
+  const expectedOrder = ["workflow-dag-bar", "workflow-content", "workflow-activity-bar", "workflow-agents-body", "workflow-jobs-body"];
+  const snapshotReply = Promise.withResolvers<Record<string, unknown>>();
+  workflow.bind({ async request(_, fields) {
+    if (fields?.name === "omo.dag.list") return { data: { ok: true, value: { runs: [{ runId: "run", parentSessionId: durable }] } } };
+    if (fields?.name === "omo.dag.snapshot") return snapshotReply.promise;
+    return { data: {} };
+  } }, durable, "/tmp");
   workflow.toggle();
   expect(props("activity")?.text).toContain("Background Activity");
   expect(props("activity-empty")?.hidden).toBe(false);
@@ -104,6 +115,13 @@ test("Background Activity folds both groups without giving their headings a fold
   expect(props("jobs-body")?.hidden).toBe(true);
   activity.observe(push(1, [bash])); pushView();
   expect(props("activity-empty")?.hidden).toBe(true);
+  expect(sections()).toEqual(expectedOrder);
+  expect(props("step-0")).toBeUndefined();
+  snapshotReply.resolve({ data: { ok: true, value: {
+    runId: "run", parentSessionId: durable, nodes: [{ id: "seed", state: "completed" }],
+  } } });
+  await dagMounted;
+  expect(props("step-0")?.text).toContain("seed");
   expect(sections()).toEqual(expectedOrder);
   for (const group of ["agents", "jobs"]) {
     expect(kind(group + "-heading")).toBe("text");
@@ -119,6 +137,11 @@ test("Background Activity folds both groups without giving their headings a fold
   expect(sections()).toEqual(expectedOrder);
   expect(props("agents-body")?.hidden).toBe(true);
   expect(props("jobs-body")?.hidden).toBe(false);
+  workflow.toggle();
+  expect(sections()).toEqual([]);
+  workflow.toggle();
+  expect(props("step-0")?.text).toContain("seed");
+  expect(sections()).toEqual(expectedOrder);
   activity.observe(push(2, [])); pushView();
   expect(props("activity-empty")?.hidden).toBe(false);
   expect(props("jobs-0")).toBeUndefined();

@@ -21,16 +21,40 @@ test("vertical DAG keeps a direct edge around the intermediate node", () => {
   expect(dark.svg).not.toMatch(/<text|<rect|review/);
   expect(dark.cards[0]).toMatchObject({ label: "A & <review>", state: "completed", props: { aria: "A & <review>, completed" } });
   expect(dark.cards.map(c => c.props.on)).toEqual([false, true, false]);
-  const paths = [...dark.svg.matchAll(/<path d="M([\d.]+) ([\d.]+) V[\d.]+ H([\d.]+) V[\d.]+ H([\d.]+) V([\d.]+)"/g)];
   const [source, middle, target] = dark.cards;
-  const [bypass] = paths;
-  if (!source || !middle || !target || !bypass) throw Error("Expected three cards and a bypass path");
-  const center = (card: typeof source) => card.left + card.width / 2;
-  expect(Number(bypass[1])).toBe(center(source));
-  expect(Number(bypass[2])).toBe(source.top + source.height);
-  expect(Number(bypass[3])).toBeLessThan(middle.left);
-  expect(Number(bypass[4])).toBe(target.left + target.width / 3);
-  expect(Number(bypass[5])).toBeLessThan(target.top);
+  if (!source || !middle || !target) throw Error("Expected three graph cards");
+  const paths = [...dark.svg.matchAll(/<path d="([^"]+)" fill="none"/g)].map(([, path]) => {
+    const points: { x: number; y: number }[] = [];
+    let x = 0, y = 0;
+    for (const [, op, a, b] of path.matchAll(/([MHV])([\d.]+)(?: ([\d.]+))?/g)) {
+      if (op !== "V") x = Number(a);
+      if (op !== "H") y = Number(b ?? a);
+      points.push({ x, y });
+    }
+    return points;
+  });
+  const insideWidth = (x: number, card: typeof source) => x > card.left && x < card.left + card.width;
+  const startsAt = (points: typeof paths[number], card: typeof source) =>
+    points[0]?.y === card.top + card.height && insideWidth(points[0].x, card);
+  const endsAt = (points: typeof paths[number], card: typeof source) => {
+    const point = points.at(-1);
+    return point?.y === card.top - 1 && insideWidth(point.x, card);
+  };
+  expect(paths).toHaveLength(3);
+  expect(paths.filter(points => startsAt(points, source) && endsAt(points, middle))).toHaveLength(1);
+  const bypass = paths.find(points => startsAt(points, source) && endsAt(points, target));
+  const direct = paths.find(points => startsAt(points, middle) && endsAt(points, target));
+  if (!bypass || !direct) throw Error("Expected A → C and B → C connectors");
+  expect(bypass.at(-1)?.x).not.toBe(direct.at(-1)?.x);
+  for (const [i, point] of bypass.entries()) {
+    const next = bypass[i + 1];
+    if (!next) break;
+    const crosses = point.x === next.x
+      ? insideWidth(point.x, middle) && Math.max(point.y, next.y) > middle.top && Math.min(point.y, next.y) < middle.top + middle.height
+      : point.y > middle.top && point.y < middle.top + middle.height &&
+        Math.max(point.x, next.x) > middle.left && Math.min(point.x, next.x) < middle.left + middle.width;
+    expect(crosses).toBe(false);
+  }
   expect(graph(steps, false)?.svg).not.toBe(dark.svg);
   const refreshed = graph(steps.map(s => ({ ...s, status: "running" })), true, "B");
   expect(refreshed?.cards.map(c => c.id)).toEqual(dark.cards.map(c => c.id));
