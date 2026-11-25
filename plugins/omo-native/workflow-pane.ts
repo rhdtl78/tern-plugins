@@ -168,7 +168,7 @@ export function workflowCompanion(path: string, token: string, chat: string, win
       screen.send("s", { sf: surface, name: "workflow-graph", css:
         `[data-id='workflow-content'] { --wf-space: .5em; --wf-caption: .875em; }
          [data-id='workflow'] .sf-text, [data-id='workflow-title'] { font-family: -apple-system, system-ui, sans-serif; }
-         [data-id='workflow-heading'], [data-id='workflow-deps-heading'], [data-id='workflow-detail-heading'] { font-weight: 600; }
+         [data-id='workflow-heading'], [data-role='workflow-subheading'], [data-id='workflow-detail-heading'] { font-weight: 600; }
          [data-id='workflow-heading'] { font-size: 1.15em; }
          [data-id='workflow-summary'], [data-id^='workflow-upstream-'] { font-size: var(--wf-caption); color: var(--t2); }
          [data-id^='workflow-upstream-'] { padding-left: 1em; }
@@ -198,6 +198,13 @@ export function workflowCompanion(path: string, token: string, chat: string, win
          [data-id='workflow-controls'] { justify-content: space-between; }
          [data-id='workflow'] { min-height: 0; overflow-y: auto; }
          [data-role='workflow-bar'] { background: var(--raise); border-top: 1px solid var(--l2); border-bottom: 1px solid var(--l2); border-left: .22em solid var(--accent); align-items: center; min-width: 0; }
+         [data-role='workflow-activity-group'] { min-width: 0; padding-inline: .5em; }
+         [data-role='workflow-activity-header'] { justify-content: space-between; align-items: baseline; margin-bottom: .125em; }
+         [data-role='workflow-activity-row'] { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: .65em; row-gap: .125em; padding-block: .35em; align-items: baseline; }
+         [data-role='workflow-activity-name'] { min-width: 0; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+         [data-role='workflow-activity-status'] { font-size: .875em; white-space: nowrap; justify-self: end; }
+         [data-role='workflow-activity-meta'], [data-role='workflow-activity-ref'] { color: var(--t2); font-size: .875em; font-variant-numeric: tabular-nums; }
+         [data-role='workflow-activity-ref'] { grid-column: 1 / -1; justify-self: end; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
          .sf-button[data-role='workflow-fold'], .sf-button[data-role='workflow-fold'][aria-pressed='true'] { color: var(--t1); background: transparent; border-color: transparent; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
          [data-id='workflow-time'], [data-id^='workflow-layer-'], [data-id='workflow-no-todo'], [data-role='workflow-bar'] .sf-text { color: var(--t2); font-size: .875em; }
          [data-id='workflow-run-picker'] { margin-left: auto; max-width: 60%; min-width: 0; }

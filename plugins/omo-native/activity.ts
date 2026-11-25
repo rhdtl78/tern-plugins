@@ -2,6 +2,7 @@ export type ActivityRow = {
   readonly id: string;
   readonly kind: "agent" | "bash" | "monitor";
   readonly label: string;
+  readonly reference?: string;
   readonly status: "running" | "queued" | "paused";
 };
 
@@ -36,15 +37,14 @@ function taskLabel(value: unknown): string | undefined {
       !/^[\p{L}\p{N}\p{M} .,'’()_-]+$/u.test(value)) return;
   const label = value.trim().replace(/ +/g, " ");
   // Reject credential markers, opaque tokens, and common shell command prefixes.
-  if (!label || /\b(?:api[_ -]?keys?|access[_ -]?tokens?|passwords?|passphrases?|secrets?|credentials?|bearer|authorization)\b|(?:^|[ _-])(?:sk[-_]|gh[pousr]_|xox[baprs]-|AKIA)|[\w-]{24,}/iu.test(label) ||
+  if (!label || taskId.test(label) || /\b(?:api[_ -]?keys?|access[_ -]?tokens?|passwords?|passphrases?|secrets?|credentials?|bearer|authorization)\b|(?:^|[ _-])(?:sk[-_]|gh[pousr]_|xox[baprs]-|AKIA)|[\w-]{24,}/iu.test(label) ||
       /^(?:sudo|curl|wget|bash|zsh|sh|eval|export|echo|sleep|cd|git|bun|npm|node|python[23]?|rm|chmod)\s/iu.test(label)) return;
   return label.length <= 72 ? label : `${Array.from(label).slice(0, 69).join("")}…`;
 }
 
 function row(kind: ActivityRow["kind"], id: string, status: ActivityRow["status"]): ActivityRow {
-  const label = kind === "agent" ? `Background agent · ${id}`
-    : `${kind === "bash" ? "Detached job" : "Monitor"} · ${id.slice(kind === "bash" ? 5 : 4)}`;
-  return { id: `${kind}:${id}`, kind, label, status };
+  const label = kind === "agent" ? "Background agent" : kind === "bash" ? "Detached job" : "Monitor";
+  return { id: `${kind}:${id}`, kind, label, reference: id, status };
 }
 
 function tasks(value: unknown, owner: string): readonly ActivityRow[] | undefined {

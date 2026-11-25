@@ -12,7 +12,7 @@ export { graph } from "./workflow-graph";
 const sheet = "workflow";
 export const workflowGraphMinWidth = 380;
 type Run = { readonly id: string; readonly title: string; readonly status: string };
-type Section = "usage" | "plan" | "dag" | "agents" | "jobs";
+type Section = "usage" | "plan" | "dag" | "activity";
 type Reader = Pick<OmoRpc, "request"> & Partial<Pick<OmoRpc, "sessionId">>;
 const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
   s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
@@ -41,7 +41,7 @@ export class Workflow {
   #todo: readonly ChecklistPhase[] = [];
   #planPath: string | undefined;
   #planRevision = 0;
-  #expanded = { usage: true, plan: true, dag: true, agents: true, jobs: true };
+  #expanded = { usage: true, plan: true, dag: true, activity: true };
   #usage: ReturnType<typeof workflowUsage>;
   #usageRevision = 0;
   #menuCursor = "";
@@ -89,7 +89,7 @@ export class Workflow {
     if (previous && counts.agent === previous.counts.agent && counts.bash === previous.counts.bash &&
         counts.monitor === previous.counts.monitor && rows.length === previous.rows.length && rows.every((row, index) => {
       const old = previous.rows[index];
-      return row.id === old?.id && row.label === old.label && row.status === old.status;
+      return row.id === old?.id && row.label === old.label && row.status === old.status && row.reference === old.reference;
     })) return;
     this.#background = view;
     if (this.#open) this.#draw();
@@ -143,7 +143,7 @@ export class Workflow {
     if (!this.#open) return;
     if (event.act === "close" && event.value === undefined) return "close";
     if (event.act === "fold") {
-      for (const section of ["usage", "plan", "dag", "agents", "jobs"] as const) {
+      for (const section of ["usage", "plan", "dag", "activity"] as const) {
         if (event.id !== `workflow-${section}`) continue;
         this.#expanded[section] = !this.#expanded[section];
         if (section === "dag") this.#menuCursor = "";
@@ -264,13 +264,27 @@ export class Workflow {
       });
     };
     const layers = workflowLayers(this.#steps);
+    const counts = this.#background?.counts;
+    const hasActivity = !!counts && (counts.agent > 0 || counts.bash > 0 || counts.monitor > 0);
     const activity = (section: "agents" | "jobs") => {
       const rows = this.#background?.rows.filter(r => (r.kind === "agent") === (section === "agents")) ?? [];
-      const counts = this.#background?.counts;
       const count = !counts ? 0 : section === "agents" ? counts.agent : counts.bash + counts.monitor;
-      return [this.#bar(section, section === "agents" ? "Agents" : "Jobs", `${count}`, !count),
-        node(`workflow-${section}-body`, "col", { hidden: !count || !this.#expanded[section] },
-          rows.map((r, i) => node(`workflow-${section}-${i}`, "text", { text: `${r.label} · ${r.status}` })))];
+      return node(`workflow-${section}-body`, "col", {
+        hidden: !count || !this.#expanded.activity, role: "workflow-activity-group",
+      }, [
+        node(`workflow-${section}-header`, "row", { role: "workflow-activity-header" }, [
+          node(`workflow-${section}-heading`, "text", { text: section === "agents" ? "Agents" : "Jobs", role: "workflow-subheading" }),
+          node(`workflow-${section}-count`, "text", { text: String(count), role: "workflow-activity-meta" }),
+        ]),
+        ...rows.map((row, i) => {
+          const id = `workflow-${section}-${i}`;
+          return node(id, "row", { role: "workflow-activity-row" }, [
+            node(id + "-name", "text", { text: row.label, role: "workflow-activity-name" }),
+            node(id + "-status", "text", { text: row.status, role: "workflow-activity-status" }),
+            node(id + "-ref", "text", { text: row.reference ?? "", hidden: !row.reference, role: "workflow-activity-ref" }),
+          ]);
+        }),
+      ]);
     };
     return [this.#bar("usage", "Usage", "", !this.#usage),
       usageBody(this.#usage, this.#expanded.usage),
@@ -281,7 +295,6 @@ export class Workflow {
         node("workflow-todo", "checklist", { mode: "full", phases: this.#todo, hidden: !this.#todo.length }),
         node("workflow-no-todo", "text", { hidden: !!this.#todo.length || !!this.#planPath, text: "No current plan or Todo." }),
       ]),
-      ...activity("agents"), ...activity("jobs"),
       this.#bar("dag", "DAG", this.#steps.length ? `${this.#steps.filter(s => s.status === "completed").length}/${this.#steps.length}` : ""),
       node("workflow-content", "col", { gap: "sm", hidden: !this.#expanded.dag }, [
       node("workflow-heading", "text", { text: title || "", hidden: !title || this.#runs.length > 1 }),
@@ -293,7 +306,7 @@ export class Workflow {
           node(`workflow-layer-${i}`, "text", { text: `Layer ${i + 1}` }), ...indices.map(listItem),
         ]) : this.#steps.map((_, i) => listItem(i)))]),
       node("workflow-dependencies", "col", { gap: "sm", hidden: !this.#steps.some(s => s.needs.length) }, [
-      node("workflow-deps-heading", "text", { text: "Dependencies" }),
+      node("workflow-deps-heading", "text", { text: "Dependencies", role: "workflow-subheading" }),
       ...this.#steps.flatMap((step, i) => step.needs.length ? [
         node(`workflow-dep-${i}`, "col", {}, [
           node(`workflow-dep-title-${i}`, "text", { text: `${step.label} · ${step.status}` }),
@@ -308,7 +321,10 @@ export class Workflow {
       node("workflow-node-detail", "text", { text: this.#detail(), hidden: !selected }),
       ...this.#neighbors(),
       node("workflow-result", "text", { text: selected?.result || "", hidden: !selected?.result }),
-    ])])];
+    ])]),
+      this.#bar("activity", "Background Activity"),
+      node("workflow-activity-empty", "text", { hidden: hasActivity || !this.#expanded.activity, text: "No background activity reported." }),
+      activity("agents"), activity("jobs")];
   }
 
   #draw() {
