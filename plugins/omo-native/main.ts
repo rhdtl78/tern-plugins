@@ -48,9 +48,9 @@ function refresh() {
   const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
   if (!canSend) slash.close();
   const backgroundView = background?.view;
-  const { agents, jobs } = backgroundView?.running ?? { agents: 0, jobs: 0 };
+  const { agents, jobs, jobsMayBeHigher } = backgroundView?.running ?? { agents: 0, jobs: 0 };
   const running = [agents ? `${agents} agent${agents === 1 ? "" : "s"}` : "",
-    jobs ? `${jobs} job${jobs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+    jobs ? jobsMayBeHigher ? `${jobs}+ jobs` : `${jobs} job${jobs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   const border = ready ? composerMode.border(!ask && !picker ? draft.text : undefined) : undefined;
   frame(["set", "draft", { text: editor.text, cursor: editor.cursor, readonly: !!picker || !ready || (!!ask && !ask.typed),
     placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend,

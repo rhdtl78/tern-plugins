@@ -3,14 +3,14 @@ export type ActivityRow = {
   readonly kind: "agent" | "bash" | "monitor";
   readonly label: string;
   readonly reference?: string;
-  readonly status: "running" | "queued" | "paused";
+  readonly status: "running" | "queued" | "paused" | "mixed" | "unknown";
 };
 
 export type ActivityView = {
   readonly active: boolean;
   readonly rows: readonly ActivityRow[];
   readonly counts: Readonly<Record<ActivityRow["kind"], number>>;
-  readonly running: { readonly agents: number; readonly jobs: number };
+  readonly running: { readonly agents: number; readonly jobs: number; readonly jobsMayBeHigher?: true };
 };
 
 const MAX_ENTRIES = 256;
@@ -117,7 +117,7 @@ function terminalState(value: unknown, owner: string): TerminalState | undefined
       .map(([id, startedAt]) => ({ ...row(kind, id, "running"), ...(startedAt === undefined ? {} : { startedAt }) }));
     const missing = source.activeCount - rows.length;
     if (missing > 0) rows.push({
-      id: `${kind}:additional`, kind, status: "running",
+      id: `${kind}:additional`, kind, status: kind === "bash" ? "running" : "unknown",
       label: `${missing} ${kind === "bash" ? "detached job" : "monitor"}${missing === 1 ? "" : "s"}`,
     });
     const parsed = { count: source.activeCount, rows };
@@ -138,24 +138,46 @@ export class ActivityProjection {
 
   get view(): ActivityView {
     const monitor = this.#terminal?.monitor;
+    const matched = new Set<MonitorDetail>();
     const monitorRows = monitor?.rows.map(({ startedAt, ...row }): ActivityRow => {
       const matches = this.#monitors.filter(detail => detail.startedAt === startedAt);
-      return matches.length === 1 && matches[0]?.paused &&
-        monitor.rows.filter(other => other.startedAt === startedAt).length === 1
-        ? { ...row, status: "paused" } : row;
+      const detail = matches[0];
+      if (!detail || matches.length !== 1 || monitor.rows.filter(other => other.startedAt === startedAt).length !== 1) {
+        return row.reference && this.#monitors.length ? { ...row, status: "unknown" } : row;
+      }
+      matched.add(detail);
+      return detail.paused ? { ...row, status: "paused" } : row;
     }) ?? [];
+    const summary = monitorRows[monitorRows.length - 1];
+    let jobsMayBeHigher = monitorRows.some(row => row.reference && row.status === "unknown");
+    let monitorJobs = monitorRows.filter(row => row.status === "running").length;
+    if (monitor && summary?.status === "unknown" && !summary.reference) {
+      // The two sources use different IDs. Only join an omitted tail when a
+      // complete same-size detail snapshot uniquely matches every listed row.
+      if (matched.size > 0 && matched.size === monitorRows.length - 1 && this.#monitors.length === monitor.count) {
+        const omitted = this.#monitors.filter(detail => !matched.has(detail));
+        const running = omitted.filter(detail => !detail.paused).length;
+        monitorJobs += running;
+        monitorRows[monitorRows.length - 1] = {
+          ...summary, status: running === 0 ? "paused" : running === omitted.length ? "running" : "mixed",
+        };
+      } else {
+        jobsMayBeHigher = true;
+      }
+    }
     const all = [
       ...(this.#tasks ?? []),
       ...(this.#terminal?.bash?.rows.map(({ startedAt: _startedAt, ...row }) => row) ?? []),
       ...monitorRows,
     ];
-    const active = all.filter(row => row.status === "running");
-    const ordered = [...active, ...all.filter(row => row.status !== "running")];
+    const live = (row: ActivityRow) => row.status === "running" || row.status === "mixed";
+    const active = all.filter(live);
+    const ordered = [...active, ...all.filter(row => !live(row))];
     const shown = { agent: 0, bash: 0, monitor: 0 };
     const running = {
       agents: active.filter(row => row.kind === "agent").length,
-      jobs: (this.#terminal?.bash?.count ?? 0) + (monitor?.count ?? 0) -
-        monitorRows.filter(row => row.status === "paused").length,
+      jobs: (this.#terminal?.bash?.count ?? 0) + monitorJobs,
+      ...(jobsMayBeHigher ? { jobsMayBeHigher: true as const } : {}),
     };
     return {
       active: running.agents > 0 || running.jobs > 0,

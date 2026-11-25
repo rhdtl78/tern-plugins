@@ -158,13 +158,41 @@ test("cold restores owned terminal sources and clears them on newer empty lifecy
   expect(activity.view).toEqual({ active: false, running: { agents: 0, jobs: 0 }, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
-test("uses authoritative counts when detail is truncated or missing", () => {
+test("preserves registration counts without assuming omitted monitors are running", () => {
   const activity = make();
   activity.observe(push(1, [{ ...bash, activeCount: 34 }, { ...monitor, items: undefined, activeCount: 2 }]));
   expect(activity.view.rows.map(row => [row.label, row.reference])).toEqual([
     ["Detached job", "bash_1"], ["33 detached jobs", undefined], ["2 monitors", undefined],
   ]);
-  expect(activity.view.running).toEqual({ agents: 0, jobs: 36 });
+  expect(activity.view.counts).toEqual({ agent: 0, bash: 34, monitor: 2 });
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 34, jobsMayBeHigher: true });
+  expect(activity.view.rows.at(-1)?.status).toBe("unknown");
+});
+
+test("reconciles truncated owned monitors when complete details match the listed identities", () => {
+  const activity = make();
+  const at = Date.parse(monitor.items[0].startedAt);
+  const monitors = Array.from({ length: 34 }, (_, i) => ({ id: `bash_${i}`, startedAtMs: at + i, paused: true }));
+  const truncated = { ...monitor, activeCount: 34, items: monitors.slice(0, 32).map((detail, i) =>
+    ({ id: `mon_${i}`, startedAt: new Date(detail.startedAtMs).toISOString() })) };
+  const detail = (rows: typeof monitors, owner = route) =>
+    extension("terminal_monitor_state", { activeCount: rows.length, monitors: rows }, owner);
+  activity.observe(push(1, [truncated]));
+  activity.observe(detail(monitors));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+  expect(activity.view.active).toBe(false);
+  const mixed = monitors.map((row, i) => i === 33 ? { ...row, paused: false } : row);
+  expect(activity.observe(detail(mixed, "foreign-route"))).toBe(false);
+  expect(activity.view.active).toBe(false);
+  activity.observe(detail(mixed));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  expect(activity.view.active).toBe(true);
+  expect(activity.view.rows[0]).toMatchObject({ label: "2 monitors", status: "mixed" });
+  activity.observe(detail(mixed.map((row, i) => i === 33 ? { ...row, startedAtMs: at } : row)));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+  expect(activity.view.active).toBe(false);
+  activity.observe(push(2, [{ ...truncated, items: [] }]));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
 });
 
 test("ignores widgets including live task duplicates and retained done or fallback bash", () => {
