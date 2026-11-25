@@ -2,8 +2,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { OmoRpc, RpcCommandError, type RpcRecord } from "./rpc";
 import { add, InputStream, node, plain, record, string, Surface, surface, type Input, type Op } from "./surface";
+import { SlashMenu } from "./slash";
 import { Editor, isStopKey, type SubmitMode } from "./editor";
 import { Transcript } from "./transcript";
+import omoIcon from "./omo-icon.svg" with { type: "text" };
 import { dialog } from "./dialog";
 import { resumeFields, sessionActivity } from "./session";
 import { listSavedSessions } from "./history";
@@ -12,16 +14,19 @@ import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
+import { ComposerMode } from "./composer-mode";
 
 const screen = new Surface(), draft = new Editor(), input = new InputStream();
+const composerMode = new ComposerMode();
 let editor = draft;
 const workflowIntent = "workflow-open-intent";
 const frame = (...ops: Op[]) => screen.frame(...ops);
+const slash = new SlashMenu(frame);
 let workflowFrame: ((...ops: Op[]) => void) | undefined;
 let workflowLaunch: AbortController | undefined;
 let workflowLifetime: Promise<void> | undefined;
 const workflow = new Workflow((...ops) => workflowFrame?.(...ops));
-const transcript = new Transcript(frame, phases => workflow.todo(phases));
+let transcript: Transcript;
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
 let background: ActivityProjection | undefined, quota: UsageMeter | undefined;
@@ -41,12 +46,23 @@ const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 function refresh() {
   const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
+  if (!canSend) slash.close();
+  const backgroundView = background?.view;
+  const { agents, jobs, jobsMayBeHigher } = backgroundView?.running ?? { agents: 0, jobs: 0 };
+  const running = [agents ? `${agents} agent${agents === 1 ? "" : "s"}` : "",
+    jobs ? jobsMayBeHigher ? `${jobs}+ jobs` : `${jobs} job${jobs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  const border = ready ? composerMode.border(!ask && !picker ? draft.text : undefined) : undefined;
   frame(["set", "draft", { text: editor.text, cursor: editor.cursor, readonly: !!picker || !ready || (!!ask && !ask.typed),
-    placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend }],
+    placeholder: ask?.typed ? "Type your answer" : "Message OMO", sendable: canSend,
+    aria: ask?.typed ? "Type your answer" : border === "ulw-running" ? "Message OMO · ULW running"
+      : border === "ulw-preview" ? "Message OMO · ULW preview"
+      : border === "research-preview" ? "Message OMO · Research preview" : "Message OMO" }],
+    ["set", "composer-mode", { role: border ?? "normal" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
     ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
-    ["set", "session-activity", { hidden: !busy && !background?.view.active }]);
+    ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
+    ["set", "session-background-counts", { text: running, hidden: !running }]);
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
 function showStatus(text: typeof status) { status = text; refresh(); }
@@ -61,6 +77,7 @@ function notify(text: string, tone: "info" | "error" = "info") {
 }
 function fail(e: unknown) {
   ready = false; busy = false;
+  composerMode.clear();
   quota?.close(); quota = undefined;
   background = undefined;
   unsubscribe?.(); workflow.disconnect();
@@ -128,6 +145,7 @@ async function answer(fields: RpcRecord) {
 }
 function onRpc(e: RpcRecord) {
   if (closing) return;
+  if (e.type === "commands_changed") { slash.changed(e.sessionId, e.commands); return; }
   if (e.type === "session_closed") { fail("OmO session closed"); return; }
   void quota?.event(e);
   if (e.type === "model_changed" && Object.keys(record(e.model)).length) showModel(e.model);
@@ -136,6 +154,7 @@ function onRpc(e: RpcRecord) {
     refresh();
   }
   workflow.event(e);
+  composerMode.observe(e);
   const active = sessionActivity(e.type);
   if (active !== undefined) {
     activity++;
@@ -166,10 +185,22 @@ async function start(hello: RpcRecord) {
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
+  let authorIcon: string | undefined;
+  if (Array.isArray(hello.features) && hello.features.includes("blobs") &&
+    Array.isArray(hello.kinds) && hello.kinds.includes("image")) {
+    const bytes = Buffer.from(omoIcon);
+    authorIcon = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
+  }
+  transcript = new Transcript(frame, phases => workflow.todo(phases), authorIcon);
   screen.send("s", { sf: surface, name: "omo-composer", css: `
     .sf-col[data-id="composer"][data-role="omp.editor"] {
+      --omo-composer-edge: 1px;
+      --omo-mode-teal: light-dark(#007d71, #31c4ae);
+      --omo-mode-violet: light-dark(#7751a6, #b597e0);
+      --omo-mode-research: light-dark(#356ca6, #83ace0);
       background: var(--raise);
-      border: 1px solid var(--l3);
+      border: var(--omo-composer-edge) solid var(--l3);
       border-radius: 22px;
       box-shadow: none;
       gap: 4px;
@@ -180,11 +211,34 @@ async function start(hello: RpcRecord) {
     .sf-col[data-id="composer"][data-role="omp.editor"]:focus-within {
       border-color: var(--accent);
     }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-preview"]),
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-running"]) {
+      --omo-mode-start: var(--omo-mode-teal);
+      --omo-mode-end: var(--omo-mode-violet);
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="research-preview"]) {
+      --omo-mode-start: var(--omo-mode-research);
+      --omo-mode-end: var(--omo-mode-research);
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"]:not([data-role="normal"])) {
+      border-color: transparent;
+      background: linear-gradient(var(--raise), var(--raise)) padding-box,
+        linear-gradient(to right, var(--omo-mode-start), var(--omo-mode-end)) border-box;
+    }
+    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-running"]) {
+      box-shadow: inset 0 0 0 var(--omo-composer-edge) var(--omo-mode-teal);
+    }
     .sf-col[data-id="composer"] > .sf-row[data-id="session-feedback"] {
       position: absolute;
       bottom: 100%;
-      left: 0;
+      left: 22px;
       pointer-events: none;
+    }
+    .sf-text[data-id="session-background-counts"] {
+      color: var(--t2);
+      font-size: .875em;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
     .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="line"] {
       min-height: 0;
@@ -234,9 +288,11 @@ async function start(hello: RpcRecord) {
   ])), add(surface, node("dock", "col", {}, [
     node("dialogs", "col"),
     node("composer", "col", { role: "omp.editor" }, [
+      node("composer-mode", "text", { role: "normal", hidden: true }),
       node("session-feedback", "row", { align: "center", gap: "sm" }, [
         node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
         node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
+        node("session-background-counts", "text", { hidden: true }),
       ]),
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
@@ -301,6 +357,7 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
     pending.forEach(onRpc);
     void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
+    await slash.bind(client);
 }
 function showModel(value: unknown) {
   currentModel = record(value);
@@ -387,7 +444,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
       // A slash command may finish inside an extension without any agent_idle.
       if (record(reply.data).disposition === "handled") {
         void workflow.refreshPlan();
-        if (startedAt === activity) { busy = false; status = ""; }
+        if (startedAt === activity) { busy = false; status = ""; composerMode.clear(); }
       }
     } else {
       // Without a turn fence, these RPCs can queue on an idle or replacement turn.
@@ -398,7 +455,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
       await rpc.request(mode, { message: text, expectedTurnId });
     }
   } catch (e) {
-    if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; }
+    if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; composerMode.clear(); }
     // A dialog may have taken the editor while admission was pending.
     const newer = draft.text;
     const prefix = text + (newer ? "\n" : "");
@@ -418,7 +475,7 @@ async function stop() {
   try {
     const reply = await rpc.abort({ intent: "stop", awaitIdle: true });
     if (record(reply.data).idle === true) {
-      if (startedAt === activity) busy = false;
+      if (startedAt === activity) { busy = false; composerMode.clear(); }
       if (!busy) notify("Stopped");
     } else if (busy) notify("Stop requested. The turn is still running.");
   } catch (e) {
@@ -430,6 +487,7 @@ async function stop() {
 }
 function toggleWorkflow() {
   if (!workflowAvailable || picker || ask) return;
+  slash.close();
   if (workflowLaunch) { frame(["set", workflowIntent, { text: "" }]); workflowLaunch.abort(); return; }
   const pane = process.env.TERN_PANE, tern = Bun.which("tern");
   if (!ready || !pane || !tern) return;
@@ -479,6 +537,13 @@ function workflowInput(i: Input) {
   if (["\x1b", "\x1b[27u", "\x07", "\x1b[103;5u"].includes(i.value)) workflowLaunch?.abort();
   else workflow.key(i.value);
 }
+function insertCommand(id?: unknown) {
+  if (!ready || busy || stopping || submitting || ask || picker) return;
+  const text = slash.pick(id);
+  if (!text) return;
+  draft.replaceDraft(text);
+  frame(["focus", "draft"]); refresh();
+}
 function handle(i: Input) {
   if (closing) return;
   if (i.kind === "key" && (i.value === "\x04" || i.value === "\x1b[100;5u")) { void close(); return; }
@@ -495,8 +560,14 @@ function handle(i: Input) {
     switch (e.ev) {
       case "toggle": transcript.fold(string(e.id), e.collapsed === true); return;
       case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
-      case "send": if (e.id === "draft" && !ask) void submit("prompt", string(e.text)); return;
+      case "send":
+        if (e.id === "draft" && !ask) {
+          if (slash.choice) insertCommand();
+          else void submit("prompt", string(e.text));
+        }
+        return;
       case "action":
+        if (e.act === "insert-command" && typeof e.id === "string") { insertCommand(e.id); return; }
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
         if (e.id === "model" && e.act === "models") openPicker("models");
         if (e.id === "stop" && e.act === "stop") void stop();
@@ -511,11 +582,17 @@ function handle(i: Input) {
   if (picker) { pickerInput(picker, i); return; }
   if (i.kind === "key" && (i.value === "\x07" || i.value === "\x1b[103;5u")) { toggleWorkflow(); return; }
   if (!live || !ready) return;
-  if (i.kind === "key" && isStopKey(i.value)) { void stop(); return; }
+  if (i.kind === "key" && slash.choice) {
+    if (["\x1b[A", "\x1b[B"].includes(i.value)) { slash.move(i.value.endsWith("A") ? -1 : 1); return; }
+    if (["\r", "\x1b[13u", "\t"].includes(i.value)) { insertCommand(); return; }
+  }
+  if (i.kind === "key" && isStopKey(i.value)) { slash.close(); void stop(); return; }
   if (ask && !ask.typed) return;
   const action = editor.apply(i);
   switch (action) {
-    case "edit": refresh(); break;
+    case "edit":
+      if (editor === draft && !busy && !submitting && !stopping) slash.edit(draft.text, draft.cursor);
+      refresh(); break;
     case "prompt": case "steer": case "follow_up": void submit(action); break;
     case "fold": transcript.flipTools(); break;
     case "exit": void close(); break;

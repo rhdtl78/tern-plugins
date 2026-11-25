@@ -41,6 +41,7 @@ export class Editor {
     this.text = this.text.slice(0, from) + text + this.text.slice(to);
     this.cursor = Math.min(this.text.length, Math.max(0, cursor));
   }
+  replaceDraft(text: string) { this.#replace(0, this.text.length, text); }
   #undoEdit(): "edit" | undefined {
     const step = this.#undo.pop();
     if (!step) return;

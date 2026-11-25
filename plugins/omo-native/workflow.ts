@@ -6,60 +6,16 @@ import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
 import type { ActivityView } from "./activity";
 import { displayStatus, short, unfinished, workflowLayers, workflowSteps, type Step } from "./workflow-projection";
+import { graph } from "./workflow-graph";
+export { graph } from "./workflow-graph";
 
 const sheet = "workflow";
 export const workflowGraphMinWidth = 380;
 type Run = { readonly id: string; readonly title: string; readonly status: string };
-type Section = "usage" | "plan" | "dag" | "agents" | "jobs";
+type Section = "usage" | "plan" | "dag" | "activity";
 type Reader = Pick<OmoRpc, "request"> & Partial<Pick<OmoRpc, "sessionId">>;
 const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
   s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
-
-export function graph(steps: readonly Step[], dark: boolean, selected = "") {
-  if (!steps.length || steps.length > 12 || steps.reduce((n, s) => n + s.needs.length, 0) > 24) return;
-  const layers = workflowLayers(steps);
-  if (!layers) return;
-  const rows = layers.map(indices => indices.map(i => steps[i]));
-  const levels = new Map(rows.flatMap((row, depth) => row.map(s => [s.id, depth] as const)));
-  const routeCount = steps.reduce((n, s) => n + s.needs.filter(id =>
-    (levels.get(s.id) ?? 0) - (levels.get(id) ?? 0) > 1).length, 0);
-  if (rows.length > 7 || routeCount > 5 || rows.some(row => row.length > 3)) return;
-  const width = 480, cardHeight = 78, stride = cardHeight + 32, gutter = 30 + routeCount * 5;
-  const height = 22 + (rows.length - 1) * stride + cardHeight;
-  const points = new Map<string, readonly [number, number, number]>();
-  for (const [depth, row] of rows.entries()) {
-    const available = width - gutter * 2, slot = available / row.length;
-    row.forEach((step, i) => points.set(step.id, [gutter + (i + 0.5) * slot, 11 + depth * stride, Math.min(235, slot - 10)]));
-  }
-  const edge = dark ? "#9c93a2" : "#65596d";
-  let outer = 0;
-  const edges = steps.flatMap(step => step.needs.map(id => {
-    const target = points.get(step.id);
-    const source = points.get(id);
-    if (!target || !source) return "";
-    const [x, y] = target, [sx, top] = source, sy = top + cardHeight, mid = sy + 24;
-    const skip = y - top > stride;
-    const rail = 10 + outer * 5;
-    if (skip) outer++;
-    const path = skip
-      ? `M${sx} ${sy} V${sy + 12} H${rail} V${y - 15} H${x} V${y - 1}`
-      : `M${sx} ${sy} V${mid} H${x} V${y - 1}`;
-    return `<path d="${path}" fill="none" stroke="${edge}" stroke-width="1.6" stroke-linejoin="round"/><path d="M${x - 4} ${y - 7} L${x} ${y - 1} L${x + 4} ${y - 7}Z" fill="${edge}"/>`;
-  })).join("");
-  const cards = steps.flatMap((step, i) => {
-    const point = points.get(step.id);
-    if (!point) return [];
-    const [x, y, wide] = point;
-    const id = `workflow-card-${i}`;
-    const state = [step.status, runtime(step)].filter(Boolean).join(" · ");
-    const route = step.route?.name || "";
-    return [{ id, left: x - wide / 2, top: y, width: wide, height: cardHeight,
-      label: step.label, route, state, status: step.status,
-      props: { aria: [step.label, route, state].filter(Boolean).join(", "), role: "workflow-card", variant: "quiet",
-        on: step.id === selected, actions: { click: "select-step" } } }];
-  });
-  return { width, height, cards, svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${edges}</svg>` };
-}
 
 export function supportsWorkflow(hello: RpcRecord): boolean {
   const kinds = hello.kinds;
@@ -85,7 +41,7 @@ export class Workflow {
   #todo: readonly ChecklistPhase[] = [];
   #planPath: string | undefined;
   #planRevision = 0;
-  #expanded = { usage: true, plan: true, dag: true, agents: true, jobs: true };
+  #expanded = { usage: true, plan: true, dag: true, activity: true };
   #usage: ReturnType<typeof workflowUsage>;
   #usageRevision = 0;
   #menuCursor = "";
@@ -133,7 +89,7 @@ export class Workflow {
     if (previous && counts.agent === previous.counts.agent && counts.bash === previous.counts.bash &&
         counts.monitor === previous.counts.monitor && rows.length === previous.rows.length && rows.every((row, index) => {
       const old = previous.rows[index];
-      return row.id === old?.id && row.label === old.label && row.status === old.status;
+      return row.id === old?.id && row.label === old.label && row.status === old.status && row.reference === old.reference;
     })) return;
     this.#background = view;
     if (this.#open) this.#draw();
@@ -187,7 +143,7 @@ export class Workflow {
     if (!this.#open) return;
     if (event.act === "close" && event.value === undefined) return "close";
     if (event.act === "fold") {
-      for (const section of ["usage", "plan", "dag", "agents", "jobs"] as const) {
+      for (const section of ["usage", "plan", "dag", "activity"] as const) {
         if (event.id !== `workflow-${section}`) continue;
         this.#expanded[section] = !this.#expanded[section];
         if (section === "dag") this.#menuCursor = "";
@@ -308,13 +264,27 @@ export class Workflow {
       });
     };
     const layers = workflowLayers(this.#steps);
+    const counts = this.#background?.counts;
+    const hasActivity = !!counts && (counts.agent > 0 || counts.bash > 0 || counts.monitor > 0);
     const activity = (section: "agents" | "jobs") => {
       const rows = this.#background?.rows.filter(r => (r.kind === "agent") === (section === "agents")) ?? [];
-      const counts = this.#background?.counts;
       const count = !counts ? 0 : section === "agents" ? counts.agent : counts.bash + counts.monitor;
-      return [this.#bar(section, section === "agents" ? "Agents" : "Jobs", `${count}`, !count),
-        node(`workflow-${section}-body`, "col", { hidden: !count || !this.#expanded[section] },
-          rows.map((r, i) => node(`workflow-${section}-${i}`, "text", { text: `${r.label} · ${r.status}` })))];
+      return node(`workflow-${section}-body`, "col", {
+        hidden: !count || !this.#expanded.activity, role: "workflow-activity-group",
+      }, [
+        node(`workflow-${section}-header`, "row", { role: "workflow-activity-header" }, [
+          node(`workflow-${section}-heading`, "text", { text: section === "agents" ? "Agents" : "Jobs", role: "workflow-subheading" }),
+          node(`workflow-${section}-count`, "text", { text: String(count), role: "workflow-activity-meta" }),
+        ]),
+        ...rows.map((row, i) => {
+          const id = `workflow-${section}-${i}`;
+          return node(id, "row", { role: "workflow-activity-row" }, [
+            node(id + "-name", "text", { text: row.label, role: "workflow-activity-name" }),
+            node(id + "-status", "text", { text: row.status, role: "workflow-activity-status" }),
+            node(id + "-ref", "text", { text: row.reference ?? "", hidden: !row.reference, role: "workflow-activity-ref" }),
+          ]);
+        }),
+      ]);
     };
     return [this.#bar("usage", "Usage", "", !this.#usage),
       usageBody(this.#usage, this.#expanded.usage),
@@ -336,7 +306,7 @@ export class Workflow {
           node(`workflow-layer-${i}`, "text", { text: `Layer ${i + 1}` }), ...indices.map(listItem),
         ]) : this.#steps.map((_, i) => listItem(i)))]),
       node("workflow-dependencies", "col", { gap: "sm", hidden: !this.#steps.some(s => s.needs.length) }, [
-      node("workflow-deps-heading", "text", { text: "Dependencies" }),
+      node("workflow-deps-heading", "text", { text: "Dependencies", role: "workflow-subheading" }),
       ...this.#steps.flatMap((step, i) => step.needs.length ? [
         node(`workflow-dep-${i}`, "col", {}, [
           node(`workflow-dep-title-${i}`, "text", { text: `${step.label} · ${step.status}` }),
@@ -351,7 +321,10 @@ export class Workflow {
       node("workflow-node-detail", "text", { text: this.#detail(), hidden: !selected }),
       ...this.#neighbors(),
       node("workflow-result", "text", { text: selected?.result || "", hidden: !selected?.result }),
-    ])]), ...activity("agents"), ...activity("jobs")];
+    ])]),
+      this.#bar("activity", "Background Activity"),
+      node("workflow-activity-empty", "text", { hidden: hasActivity || !this.#expanded.activity, text: "No background activity reported." }),
+      activity("agents"), activity("jobs")];
   }
 
   #draw() {

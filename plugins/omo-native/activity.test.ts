@@ -30,27 +30,44 @@ const make = () => new ActivityProjection(route, durable);
 // Apply the same mount/set/delete rules as a native subtree. An update to a
 // nonexistent row cannot create it; deleting its parent must remove old rows.
 function panelFixture() {
-  const nodes = new Map<string,{ p: ReturnType<typeof record>; parent: string }>();
+  const nodes = new Map<string,{ p: ReturnType<typeof record>; parent: string; kind: unknown }>();
+  const order = new Map<string, string[]>();
   const remove = (id: string) => {
+    const parent = nodes.get(id)?.parent;
+    if (parent) order.set(parent, (order.get(parent) ?? []).filter(child => child !== id));
+    for (const child of order.get(id) ?? []) remove(child);
+    order.delete(id);
     nodes.delete(id);
-    for (const [key, item] of nodes) if (item.parent === id) remove(key);
   };
-  const mount = (data: unknown, parent: string) => {
+  const mount = (data: unknown, parent: string, before?: unknown) => {
     const n = record(data);
-    nodes.set(String(n.id), { p: record(n.p), parent });
-    if (Array.isArray(n.c)) n.c.forEach(c => mount(c, String(n.id)));
+    const id = String(n.id);
+    const siblings = order.get(parent) ?? [];
+    const at = typeof before === "string" ? siblings.indexOf(before) : siblings.length;
+    if (at < 0) throw new Error(`No sibling ${before} under ${parent}`);
+    siblings.splice(at, 0, id);
+    order.set(parent, siblings);
+    nodes.set(id, { p: record(n.p), parent, kind: n.k });
+    if (Array.isArray(n.c)) n.c.forEach(c => mount(c, id));
   };
   const frame = (...ops: Op[]) => {
-    for (const [action,id,p,,child] of ops) {
-      if (action === "add") mount(child, String(p));
+    for (const [action,id,p,before,child] of ops) {
+      if (action === "add") mount(child, String(p), before);
       if (action === "del") remove(String(id));
       const n = nodes.get(String(id));
       if (action === "set" && n) Object.assign(n.p, record(p));
     }
   };
-  const workflow = new Workflow(frame), activity = make();
+  const dagMounted = Promise.withResolvers<void>();
+  const workflow = new Workflow((...ops) => {
+    frame(...ops);
+    if (nodes.has("workflow-step-0")) dagMounted.resolve();
+  }), activity = make();
   const pushView = () => workflow.background(activity.view);
-  return { workflow, activity, pushView, props: (id: string) => nodes.get(`workflow-${id}`)?.p };
+  return { workflow, activity, pushView, dagMounted: dagMounted.promise, props: (id: string) => nodes.get(`workflow-${id}`)?.p,
+    kind: (id: string) => nodes.get(`workflow-${id}`)?.kind,
+    sections: () => (order.get("workflow") ?? []).filter(id =>
+      /^(?:workflow-content|workflow-(?:dag|activity)-bar|workflow-(?:agents|jobs)-body)$/.test(id)) };
 }
 
 test("owner activity badges count work rather than capped rows", () => {
@@ -58,20 +75,86 @@ test("owner activity badges count work rather than capped rows", () => {
   workflow.toggle();
   activity.observe(push(1,[bash])); activity.observe(update([agent])); pushView();
   expect(props("agents-count")?.text).toBe("1");
-  expect(props("jobs-0")?.text).toBe("Detached job · 1 · running");
-  activity.observe(update(Array.from({length:16},(_,i)=>({...agent, task_id:`st_${i.toString(16).padStart(8,"0")}`})))); pushView();
-  expect(props("agents-count")?.text).toBe("16");
+  expect(props("jobs-0-name")?.text).toBe("Detached job");
+  expect(props("jobs-0-status")?.text).toBe("running");
+  expect(props("jobs-0-ref")?.text).toBe("bash_1");
+  activity.observe(update(Array.from({length:18},(_,i)=>({...agent, task_id:`st_${i.toString(16).padStart(8,"0")}`})))); pushView();
+  expect(props("agents-count")?.text).toBe("18");
+  expect(props("agents-15-name")?.text).toBe("Review workspace changes");
+  expect(props("agents-16-name")).toBeUndefined();
   expect(props("jobs-count")?.text).toBe("1");
-  expect(props("jobs-0")?.text).toBe("Detached job · 1 · running");
+  expect(props("jobs-0-name")?.text).toBe("Detached job");
+  expect(props("agents-0-name")?.text).toBe("Review workspace changes");
   activity.observe(update([], "foreign")); pushView();
-  expect(props("agents-count")?.text).toBe("16");
+  expect(props("agents-count")?.text).toBe("18");
   activity.observe(update([])); activity.observe(push(2,[{...bash,activeCount:3,items:[]}])); pushView();
-  expect(props("agents-bar")?.hidden).toBe(true);
+  expect(props("agents-body")?.hidden).toBe(true);
   expect(props("jobs-count")?.text).toBe("3");
-  expect(props("jobs-0")?.text).toBe("3 detached jobs · running");
+  expect(props("jobs-0-name")?.text).toBe("3 detached jobs");
+  expect(props("jobs-0-status")?.text).toBe("running");
+  expect(props("jobs-0-ref")?.hidden).toBe(true);
   activity.observe(push(3,[])); pushView();
-  expect(props("jobs-bar")?.hidden).toBe(true);
+  expect(props("jobs-body")?.hidden).toBe(true);
   expect(props("jobs-0")).toBeUndefined();
+});
+
+test("Background Activity folds both groups without giving their headings a fold action", async () => {
+  const { workflow, activity, pushView, dagMounted, props, kind, sections } = panelFixture();
+  const expectedOrder = ["workflow-dag-bar", "workflow-content", "workflow-activity-bar", "workflow-agents-body", "workflow-jobs-body"];
+  const snapshotReply = Promise.withResolvers<Record<string, unknown>>();
+  workflow.bind({ async request(_, fields) {
+    if (fields?.name === "omo.dag.list") return { data: { ok: true, value: { runs: [{ runId: "run", parentSessionId: durable }] } } };
+    if (fields?.name === "omo.dag.snapshot") return snapshotReply.promise;
+    return { data: {} };
+  } }, durable, "/tmp");
+  workflow.toggle();
+  expect(props("activity")?.text).toContain("Background Activity");
+  expect(props("activity-empty")?.hidden).toBe(false);
+  activity.observe(update([agent])); pushView();
+  expect(props("agents-body")?.hidden).toBe(false);
+  expect(props("jobs-body")?.hidden).toBe(true);
+  activity.observe(push(1, [bash])); pushView();
+  expect(props("activity-empty")?.hidden).toBe(true);
+  expect(sections()).toEqual(expectedOrder);
+  expect(props("step-0")).toBeUndefined();
+  snapshotReply.resolve({ data: { ok: true, value: {
+    runId: "run", parentSessionId: durable, nodes: [{ id: "seed", state: "completed" }],
+  } } });
+  await dagMounted;
+  expect(props("step-0")?.text).toContain("seed");
+  expect(sections()).toEqual(expectedOrder);
+  for (const group of ["agents", "jobs"]) {
+    expect(kind(group + "-heading")).toBe("text");
+    expect(props(group + "-heading")?.actions).toBeUndefined();
+  }
+  workflow.action({ act: "fold", id: "workflow-agents-heading" });
+  expect(props("agents-body")?.hidden).toBe(false);
+  workflow.action({ act: "fold", id: "workflow-activity" });
+  expect(props("agents-body")?.hidden).toBe(true);
+  expect(props("jobs-body")?.hidden).toBe(true);
+  activity.observe(update([])); pushView();
+  workflow.action({ act: "fold", id: "workflow-activity" });
+  expect(sections()).toEqual(expectedOrder);
+  expect(props("agents-body")?.hidden).toBe(true);
+  expect(props("jobs-body")?.hidden).toBe(false);
+  workflow.toggle();
+  expect(sections()).toEqual([]);
+  workflow.toggle();
+  expect(props("step-0")?.text).toContain("seed");
+  expect(sections()).toEqual(expectedOrder);
+  activity.observe(push(2, [])); pushView();
+  expect(props("activity-empty")?.hidden).toBe(false);
+  expect(props("jobs-0")).toBeUndefined();
+});
+
+test("an ID-only agent name falls back to readable text and renders the ID as metadata", () => {
+  const { workflow, activity, pushView, props } = panelFixture();
+  workflow.toggle();
+  activity.observe(update([{ ...agent, task_summary: undefined, name: agent.task_id }]));
+  pushView();
+  expect(props("agents-0-name")?.text).toBe("Background agent");
+  expect(props("agents-0-ref")?.text).toBe(agent.task_id);
+  expect(props("agents-0-ref")?.hidden).toBe(false);
 });
 
 for (const startsLive of [false,true]) test(`reopen reconciles jobs from the mounted ${startsLive ? "populated" : "empty"} body`, () => {
@@ -81,27 +164,116 @@ for (const startsLive of [false,true]) test(`reopen reconciles jobs from the mou
   workflow.toggle(); change(true);
   if(startsLive) change(false);
   workflow.toggle(); change(startsLive); workflow.toggle(); change(!startsLive);
-  expect(props("jobs-0")?.text).toBe(startsLive ? undefined : "Detached job · 1 · running");
-  expect(props("jobs-bar")?.hidden).toBe(startsLive);
+  expect(props("jobs-0-name")?.text).toBe(startsLive ? undefined : "Detached job");
+  expect(props("jobs-body")?.hidden).toBe(startsLive);
 });
 
 test("cold restores owned terminal sources and clears them on newer empty lifecycle", () => {
   const activity = make();
   expect(activity.restore({ sessionId: durable, lifecycle: lifecycle(2, [bash, monitor]) })).toBe(true);
-  expect(activity.view).toEqual({ active: true, counts: { agent: 0, bash: 1, monitor: 1 }, rows: [
-    { id: "bash:bash_1", kind: "bash", status: "running", label: "Detached job · 1" },
-    { id: "monitor:mon_1PYH050XYJ1NJ6X8", kind: "monitor", status: "running", label: "Monitor · 1PYH050XYJ1NJ6X8" },
+  expect(activity.view).toEqual({ active: true, running: { agents: 0, jobs: 2 }, counts: { agent: 0, bash: 1, monitor: 1 }, rows: [
+    { id: "bash:bash_1", kind: "bash", status: "running", label: "Detached job", reference: "bash_1" },
+    { id: "monitor:mon_1PYH050XYJ1NJ6X8", kind: "monitor", status: "running", label: "Monitor", reference: "mon_1PYH050XYJ1NJ6X8" },
   ] });
 
   activity.observe(push(3, []));
   expect(activity.restore({ sessionId: durable, lifecycle: lifecycle(2, [bash]) })).toBe(false);
-  expect(activity.view).toEqual({ active: false, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
+  expect(activity.view).toEqual({ active: false, running: { agents: 0, jobs: 0 }, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
-test("uses authoritative counts when detail is truncated or missing", () => {
+test("preserves registration counts without assuming omitted monitors are running", () => {
   const activity = make();
   activity.observe(push(1, [{ ...bash, activeCount: 34 }, { ...monitor, items: undefined, activeCount: 2 }]));
-  expect(activity.view.rows.map(row => row.label)).toEqual(["Detached job · 1", "33 detached jobs", "2 monitors"]);
+  expect(activity.view.rows.map(row => [row.label, row.reference])).toEqual([
+    ["Detached job", "bash_1"], ["33 detached jobs", undefined], ["2 monitors", undefined],
+  ]);
+  expect(activity.view.counts).toEqual({ agent: 0, bash: 34, monitor: 2 });
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 34, jobsMayBeHigher: true });
+  expect(activity.view.rows.at(-1)?.status).toBe("unknown");
+});
+
+test("reconciles truncated owned monitors when complete details match the listed identities", () => {
+  const activity = make();
+  const at = Date.parse(monitor.items[0].startedAt);
+  const monitors = Array.from({ length: 34 }, (_, i) => ({ id: `bash_${i}`, startedAtMs: at + i, paused: true }));
+  const truncated = { ...monitor, activeCount: 34, items: monitors.slice(0, 32).map((detail, i) =>
+    ({ id: `mon_${i}`, startedAt: new Date(detail.startedAtMs).toISOString() })) };
+  const detail = (rows: typeof monitors, owner = route) =>
+    extension("terminal_monitor_state", { activeCount: rows.length, monitors: rows }, owner);
+  activity.observe(push(1, [truncated]));
+  activity.observe(detail(monitors));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+  expect(activity.view.active).toBe(false);
+  const mixed = monitors.map((row, i) => i === 33 ? { ...row, paused: false } : row);
+  expect(activity.observe(detail(mixed, "foreign-route"))).toBe(false);
+  expect(activity.view.active).toBe(false);
+  activity.observe(detail(mixed));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  expect(activity.view.active).toBe(true);
+  expect(activity.view.rows[0]).toMatchObject({ label: "2 monitors", status: "mixed" });
+  activity.observe(detail(mixed.map((row, i) => i === 33 ? { ...row, startedAtMs: at } : row)));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+  expect(activity.view.active).toBe(false);
+  activity.observe(push(2, [{ ...truncated, items: [] }]));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+});
+
+function monitorTransition() {
+  const startedAtMs = Date.parse(monitor.items[0].startedAt);
+  const full = Array.from({ length: 34 }, (_, i) => ({ id: `bash_${i}`, startedAtMs: startedAtMs + i, paused: i !== 33 }));
+  const activity = make();
+  const detail = (rows: typeof full) =>
+    activity.observe(extension("terminal_monitor_state", { activeCount: rows.length, monitors: rows }));
+  const lifecycle = (seq: number, activeCount: number) => activity.observe(push(seq, [{
+    ...monitor, activeCount, items: full.slice(0, 32).map((row, i) =>
+      ({ id: `mon_${i}`, startedAt: new Date(row.startedAtMs).toISOString() })),
+  }]));
+  const replacements = full.map((row, i) => i < 32 ? row :
+    { ...row, id: `bash_${i + 10}`, startedAtMs: row.startedAtMs + 1000, paused: true });
+  return { activity, full, detail, lifecycle, replacements };
+}
+
+test("a lifecycle membership change cannot revive old omitted monitor liveness", () => {
+  const { activity, full, detail, lifecycle, replacements } = monitorTransition();
+  detail(full); lifecycle(1, 34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  lifecycle(2, 32);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+  lifecycle(3, 34);
+  expect(activity.view.counts.monitor).toBe(34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+  expect(activity.view.active).toBe(false);
+  detail(replacements);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+  expect(activity.view.active).toBe(false);
+  detail(replacements.map((row, i) => i === 33 ? { ...row, paused: false } : row));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  expect(activity.view.active).toBe(true);
+});
+
+test("a received empty monitor snapshot does not promote listed registrations to running", () => {
+  const { activity, full, detail, lifecycle } = monitorTransition();
+  lifecycle(1, 34); detail(full);
+  expect(activity.view.active).toBe(true);
+  expect(detail([])).toBe(true);
+  expect(activity.view.counts.monitor).toBe(34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+  expect(activity.view.active).toBe(false);
+  expect(activity.view.rows.every(row => row.status === "unknown")).toBe(true);
+  activity.observe(push(2, []));
+  expect(activity.view.counts.monitor).toBe(0);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+});
+
+test("detail-first producer transitions retain confirmed visible and fresh omitted liveness", () => {
+  const { activity, full, detail, lifecycle, replacements } = monitorTransition();
+  const visibleLive = (rows: typeof full) => rows.map((row, i) => i === 0 ? { ...row, paused: false } : row);
+  detail(visibleLive(full.slice(0, 32))); lifecycle(1, 32);
+  expect(activity.view.running.jobs).toBe(1);
+  detail(visibleLive(replacements)); lifecycle(2, 34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  lifecycle(3, 34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
 });
 
 test("ignores widgets including live task duplicates and retained done or fallback bash", () => {
@@ -114,8 +286,8 @@ test("ignores widgets including live task duplicates and retained done or fallba
     { id: "bash_3", kind: "bash", state: "live" },
   ] }));
 
-  expect(activity.view).toEqual({ active: true, counts: { agent: 1, bash: 0, monitor: 0 }, rows: [
-    { id: "agent:st_01a20c83", kind: "agent", status: "running", label: "Review workspace changes" },
+  expect(activity.view).toEqual({ active: true, running: { agents: 1, jobs: 0 }, counts: { agent: 1, bash: 0, monitor: 0 }, rows: [
+    { id: "agent:st_01a20c83", kind: "agent", status: "running", label: "Review workspace changes", reference: "st_01a20c83" },
   ] });
 });
 
@@ -127,7 +299,7 @@ test("prefers the summary, falls back to the name, and rejects unsafe free text"
     { ...agent, task_id: "st_01a20c85", task_summary: "API key abc123", name: "bad\u001b[31m" },
   ]));
   expect(activity.view.rows.map(row => row.label)).toEqual([
-    "Review workspace changes", "Audit changes", "Background agent · st_01a20c85",
+    "Review workspace changes", "Audit changes", "Background agent",
   ]);
 });
 
@@ -140,6 +312,7 @@ test("rejects foreign routes and durable owners and preserves data on malformed 
   expect(activity.observe(update([], "other"))).toBe(false);
   expect(activity.observe(update([null]))).toBe(false);
   expect(activity.view.rows.map(row => row.id)).toEqual(["bash:bash_1"]);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
 });
 
 test("only projects owned resident task runners with supported modes and states", () => {
@@ -156,8 +329,9 @@ test("only projects owned resident task runners with supported modes and states"
   expect(activity.view.rows.map(row => [row.id, row.status])).toEqual([
     ["agent:st_01a20c82", "running"], ["agent:st_01a20c81", "queued"], ["agent:st_01a20c83", "paused"],
   ]);
+  expect(activity.view.running).toEqual({ agents: 1, jobs: 0 });
   activity.observe(update([task(2, { status: "completed" })]));
-  expect(activity.view).toEqual({ active: false, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
+  expect(activity.view).toEqual({ active: false, running: { agents: 0, jobs: 0 }, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
 test("same-owner push wins over in-flight pulls; reset fences old replies and a new pull can restore", () => {
@@ -191,26 +365,29 @@ test("user Stop holds wakes without cancelling jobs; a muted monitor remains reg
   activity.observe(push(3, [bash, monitor], "paused"));
 
   expect(activity.view.active).toBe(true);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
   expect(activity.view.rows.map(row => [row.kind, row.status])).toEqual([
     ["bash", "running"], ["monitor", "paused"],
   ]);
   activity.observe(push(4, [monitor], "paused"));
   expect(activity.view.active).toBe(false);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
   expect(activity.view.rows.map(row => row.status)).toEqual(["paused"]);
   activity.observe(push(5, []));
-  expect(activity.view).toEqual({ active: false, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
+  expect(activity.view).toEqual({ active: false, running: { agents: 0, jobs: 0 }, counts: { agent: 0, bash: 0, monitor: 0 }, rows: [] });
 });
 
 test("bounds sidebar rows without deriving liveness from the displayed rows", () => {
   const activity = make();
   const tasks = Array.from({ length: 24 }, (_, i) => ({
-    ...agent, task_id: `st_01a20c${(i + 16).toString(16)}`, status: "paused",
+    ...agent, task_id: `st_01a20c${(i + 16).toString(16)}`, status: i < 20 ? "running" : "paused",
   }));
   activity.observe(update(tasks));
   activity.observe(push(1, [bash]));
   expect(activity.view.active).toBe(true);
   expect(activity.view.counts).toEqual({ agent: 24, bash: 1, monitor: 0 });
+  expect(activity.view.running).toEqual({ agents: 20, jobs: 1 });
   expect(activity.view.rows.filter(row => row.kind === "agent")).toHaveLength(16);
   expect(activity.view.rows).toHaveLength(17);
-  expect(activity.view.rows[0]?.kind).toBe("bash");
+  expect(activity.view.rows.at(-1)?.kind).toBe("bash");
 });

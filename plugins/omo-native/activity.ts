@@ -2,13 +2,15 @@ export type ActivityRow = {
   readonly id: string;
   readonly kind: "agent" | "bash" | "monitor";
   readonly label: string;
-  readonly status: "running" | "queued" | "paused";
+  readonly reference?: string;
+  readonly status: "running" | "queued" | "paused" | "mixed" | "unknown";
 };
 
 export type ActivityView = {
   readonly active: boolean;
   readonly rows: readonly ActivityRow[];
   readonly counts: Readonly<Record<ActivityRow["kind"], number>>;
+  readonly running: { readonly agents: number; readonly jobs: number; readonly jobsMayBeHigher?: true };
 };
 
 const MAX_ENTRIES = 256;
@@ -35,15 +37,14 @@ function taskLabel(value: unknown): string | undefined {
       !/^[\p{L}\p{N}\p{M} .,'’()_-]+$/u.test(value)) return;
   const label = value.trim().replace(/ +/g, " ");
   // Reject credential markers, opaque tokens, and common shell command prefixes.
-  if (!label || /\b(?:api[_ -]?keys?|access[_ -]?tokens?|passwords?|passphrases?|secrets?|credentials?|bearer|authorization)\b|(?:^|[ _-])(?:sk[-_]|gh[pousr]_|xox[baprs]-|AKIA)|[\w-]{24,}/iu.test(label) ||
+  if (!label || taskId.test(label) || /\b(?:api[_ -]?keys?|access[_ -]?tokens?|passwords?|passphrases?|secrets?|credentials?|bearer|authorization)\b|(?:^|[ _-])(?:sk[-_]|gh[pousr]_|xox[baprs]-|AKIA)|[\w-]{24,}/iu.test(label) ||
       /^(?:sudo|curl|wget|bash|zsh|sh|eval|export|echo|sleep|cd|git|bun|npm|node|python[23]?|rm|chmod)\s/iu.test(label)) return;
   return label.length <= 72 ? label : `${Array.from(label).slice(0, 69).join("")}…`;
 }
 
 function row(kind: ActivityRow["kind"], id: string, status: ActivityRow["status"]): ActivityRow {
-  const label = kind === "agent" ? `Background agent · ${id}`
-    : `${kind === "bash" ? "Detached job" : "Monitor"} · ${id.slice(kind === "bash" ? 5 : 4)}`;
-  return { id: `${kind}:${id}`, kind, label, status };
+  const label = kind === "agent" ? "Background agent" : kind === "bash" ? "Detached job" : "Monitor";
+  return { id: `${kind}:${id}`, kind, label, reference: id, status };
 }
 
 function tasks(value: unknown, owner: string): readonly ActivityRow[] | undefined {
@@ -90,6 +91,22 @@ type SourceRow = ActivityRow & { readonly startedAt?: number };
 type Source = { readonly count: number; readonly rows: readonly SourceRow[] };
 type TerminalState = { readonly seq: number; readonly bash?: Source; readonly monitor?: Source };
 
+function monitorMatches(source: Source, details: readonly MonitorDetail[]) {
+  const matched = new Map<string, MonitorDetail>();
+  for (const row of source.rows) {
+    if (row.startedAt === undefined || source.rows.filter(other => other.startedAt === row.startedAt).length !== 1) continue;
+    const candidates = details.filter(detail => detail.startedAt === row.startedAt);
+    if (candidates.length === 1 && candidates[0]) matched.set(row.id, candidates[0]);
+  }
+  return matched;
+}
+
+function sameMonitorMembership(previous: Source | undefined, next: Source | undefined): boolean {
+  return previous === next || !!previous && !!next && previous.count === next.count &&
+    previous.rows.length === next.rows.length && previous.rows.every(row =>
+      next.rows.some(other => row.id === other.id && row.startedAt === other.startedAt));
+}
+
 function terminalState(value: unknown, owner: string): TerminalState | undefined {
   const data = object(value);
   if (data?.role !== "root" || data.rootSessionId !== owner || !count(data.seq)) return;
@@ -116,7 +133,7 @@ function terminalState(value: unknown, owner: string): TerminalState | undefined
       .map(([id, startedAt]) => ({ ...row(kind, id, "running"), ...(startedAt === undefined ? {} : { startedAt }) }));
     const missing = source.activeCount - rows.length;
     if (missing > 0) rows.push({
-      id: `${kind}:additional`, kind, status: "running",
+      id: `${kind}:additional`, kind, status: kind === "bash" ? "running" : "unknown",
       label: `${missing} ${kind === "bash" ? "detached job" : "monitor"}${missing === 1 ? "" : "s"}`,
     });
     const parsed = { count: source.activeCount, rows };
@@ -131,28 +148,53 @@ export class ActivityProjection {
   #taskRevision = 0;
   #tasks?: readonly ActivityRow[];
   #terminal?: TerminalState;
-  #monitors: readonly MonitorDetail[] = [];
+  #monitors?: readonly MonitorDetail[];
+  #monitorJoin?: "pending" | "matched";
 
   constructor(readonly routeId: string, readonly durableId: string) {}
 
   get view(): ActivityView {
     const monitor = this.#terminal?.monitor;
-    const monitorRows = monitor?.rows.map(({ startedAt, ...row }): ActivityRow => {
-      const matches = this.#monitors.filter(detail => detail.startedAt === startedAt);
-      return matches.length === 1 && matches[0]?.paused &&
-        monitor.rows.filter(other => other.startedAt === startedAt).length === 1
-        ? { ...row, status: "paused" } : row;
+    const matched = monitor && this.#monitors ? monitorMatches(monitor, this.#monitors) : undefined;
+    const unconfirmed = monitor?.rows.some(row => !row.reference) || this.#monitors !== undefined;
+    const monitorRows = monitor?.rows.map(({ startedAt: _startedAt, ...row }): ActivityRow => {
+      const detail = matched?.get(row.id);
+      if (!detail) return row.reference && unconfirmed ? { ...row, status: "unknown" } : row;
+      return detail.paused ? { ...row, status: "paused" } : row;
     }) ?? [];
+    const summary = monitorRows[monitorRows.length - 1];
+    let jobsMayBeHigher = monitorRows.some(row => row.reference && row.status === "unknown");
+    let monitorJobs = monitorRows.filter(row => row.status === "running").length;
+    if (monitor && summary?.status === "unknown" && !summary.reference) {
+      if (this.#monitorJoin === "matched" && matched && this.#monitors) {
+        const visible = new Set(matched.values());
+        const omitted = this.#monitors.filter(detail => !visible.has(detail));
+        const running = omitted.filter(detail => !detail.paused).length;
+        monitorJobs += running;
+        monitorRows[monitorRows.length - 1] = {
+          ...summary, status: running === 0 ? "paused" : running === omitted.length ? "running" : "mixed",
+        };
+      } else {
+        jobsMayBeHigher = true;
+      }
+    }
     const all = [
       ...(this.#tasks ?? []),
       ...(this.#terminal?.bash?.rows.map(({ startedAt: _startedAt, ...row }) => row) ?? []),
       ...monitorRows,
     ];
-    const active = all.filter(row => row.status === "running");
-    const ordered = [...active, ...all.filter(row => row.status !== "running")];
+    const live = (row: ActivityRow) => row.status === "running" || row.status === "mixed";
+    const active = all.filter(live);
+    const ordered = [...active, ...all.filter(row => !live(row))];
     const shown = { agent: 0, bash: 0, monitor: 0 };
+    const running = {
+      agents: active.filter(row => row.kind === "agent").length,
+      jobs: (this.#terminal?.bash?.count ?? 0) + monitorJobs,
+      ...(jobsMayBeHigher ? { jobsMayBeHigher: true as const } : {}),
+    };
     return {
-      active: active.length > 0,
+      active: running.agents > 0 || running.jobs > 0,
+      running,
       counts: { agent: this.#tasks?.length ?? 0, bash: this.#terminal?.bash?.count ?? 0, monitor: monitor?.count ?? 0 },
       rows: ordered.filter(row => shown[row.kind]++ < MAX_ROWS),
     };
@@ -162,7 +204,8 @@ export class ActivityProjection {
     this.#taskRevision++;
     this.#tasks = undefined;
     this.#terminal = undefined;
-    this.#monitors = [];
+    this.#monitors = undefined;
+    this.#monitorJoin = undefined;
   }
 
   /** Feed OmoRpc.openSession().state or getState() for this projection's connection. */
@@ -196,6 +239,7 @@ export class ActivityProjection {
         const rows = monitors(frame.data);
         if (!rows) return false;
         this.#monitors = rows;
+        this.#monitorJoin = this.#matchesMonitorMembership(this.#terminal?.monitor) ? "matched" : "pending";
         return true;
       }
       default:
@@ -206,8 +250,21 @@ export class ActivityProjection {
   #setTerminal(value: unknown): boolean {
     const next = terminalState(value, this.durableId);
     if (!next || next.seq <= (this.#terminal?.seq ?? -1)) return false;
+    if (!sameMonitorMembership(this.#terminal?.monitor, next.monitor)) {
+      // OmO emits route-scoped detail before forwarding a membership change.
+      // A detail can join its next changed membership, never a later one after
+      // a contradiction. Keep independently matched visible rows.
+      this.#monitorJoin = this.#monitorJoin === "pending" && this.#matchesMonitorMembership(next.monitor)
+        ? "matched" : undefined;
+    }
     this.#terminal = next;
     return true;
+  }
+
+  #matchesMonitorMembership(source: Source | undefined): boolean {
+    if (!source || !this.#monitors || source.count !== this.#monitors.length) return false;
+    const listed = source.rows.filter(row => row.reference).length;
+    return listed > 0 && monitorMatches(source, this.#monitors).size === listed;
   }
 
   #setTasks(value: unknown): boolean {

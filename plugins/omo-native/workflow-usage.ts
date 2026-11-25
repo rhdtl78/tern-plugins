@@ -9,6 +9,7 @@ const count = (n: unknown): n is number => typeof n === "number" && Number.isSaf
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumSignificantDigits: 3 });
 const tokens = (n: number) => compact.format(n || 0).replace("K", "k");
 const dollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 6 });
+const percent = new Intl.NumberFormat("en-US", { style: "percent", maximumFractionDigits: 1 });
 function costRow({ cost, costUnknown }: RpcRecord) {
   const partial = costUnknown === true;
   if (costUnknown !== undefined && !partial && costUnknown !== false) return;
@@ -39,9 +40,10 @@ export function workflowUsage(stats: RpcRecord) {
     ? { value: Math.min(1, window.tokens / window.contextWindow),
       label: `Context  ${tokens(window.tokens)} / ${tokens(window.contextWindow)}` } : undefined;
   if (!rows.length && !context) return;
-  // A partial breakdown is a mix of the reported categories, not the full session total.
-  const center = series.length === categories.length && series.reduce((n, s) => n + s.value, 0) === raw.total
-    ? total : undefined;
+  const { input, cacheRead, cacheWrite } = raw;
+  // Cache writes are uncached input; output is not part of the hit-rate denominator.
+  const inputTotal = count(input) && count(cacheRead) && count(cacheWrite) ? input + cacheRead + cacheWrite : 0;
+  const center = inputTotal > 0 && count(cacheRead) ? percent.format(cacheRead / inputTotal) : undefined;
   return { series, rows, center, context };
 }
 
@@ -49,8 +51,8 @@ export function usageBody(usage: ReturnType<typeof workflowUsage>, expanded: boo
   const series = usage?.series ?? [], rows = usage?.rows ?? [], context = usage?.context;
   return node("workflow-usage-body", "col", { gap: "sm", hidden: !expanded || !usage }, [
     node("workflow-usage-split", "row", { gap: "md", hidden: !rows.length }, [
-      node("workflow-usage-chart", "chart", { kind: "donut", size: "sm", series, total: usage?.center ?? "Mix",
-        caption: usage?.center ? "tokens" : "reported", aria: "Reported token composition",
+      node("workflow-usage-chart", "chart", { kind: "donut", size: "sm", series, total: usage?.center ?? "—",
+        caption: "Cache hit rate", aria: `Reported token composition; cache hit rate ${usage?.center ?? "unavailable"}`,
         hidden: !series.some(s => s.value > 0) }),
       node("workflow-usage-table", "table", { grow: 1, aria: "Cumulative session usage",
         cols: [{ id: "key", head: "Session usage", grow: 1 }, { id: "value", head: "Amount", align: "end", mono: true }],
