@@ -1,4 +1,4 @@
-import type { OmoRpc } from "./rpc";
+import { RpcCommandError, RpcTransportError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, plain, record, string, type Op } from "./surface";
 
 type Source = Pick<OmoRpc, "sessionId" | "request">;
@@ -26,16 +26,22 @@ export class SlashMenu {
   #matches: Command[] = [];
   #index = 0;
   #query?: string;
+  #selection?: string;
   buttons: readonly { readonly id: string; readonly name: string }[] = [];
   constructor(private readonly frame: (...ops: Op[]) => void) {}
 
   async bind(source: Source) {
     this.close(); this.#source = source; this.#rows = [];
     const version = ++this.#version;
+    let reply: RpcRecord;
     try {
-      const reply = await source.request("get_commands");
-      if (version === this.#version) this.changed(source.sessionId, record(reply.data).commands);
-    } catch { /* Optional discovery must not block input on older engines. */ }
+      reply = await source.request("get_commands");
+    } catch (error) {
+      if (error instanceof RpcTransportError ||
+          (error instanceof RpcCommandError && error.command === "get_commands")) return;
+      throw error;
+    }
+    if (version === this.#version) this.changed(source.sessionId, record(reply.data).commands);
   }
   changed(owner: unknown, rows: unknown) {
     if (!owner || owner !== this.#source?.sessionId) return;
@@ -45,23 +51,31 @@ export class SlashMenu {
   edit(text: string, cursor: number) {
     const q = text.slice(1);
     if (cursor !== text.length || !text.startsWith("/") || (q && !token.test(q))) { this.close(); return; }
-    this.#query = q.toLowerCase(); this.#filter();
+    const query = q.toLowerCase();
+    if (query !== this.#query) this.#selection = undefined;
+    this.#query = query; this.#filter();
   }
   #filter() {
     const q = this.#query;
     this.#matches = q === undefined ? [] : this.#rows.filter(row => row.name.toLowerCase().includes(q));
-    this.#index = 0; this.#draw();
+    const selected = this.#matches.findIndex(row => row.name === this.#selection);
+    if (selected < 0) this.#selection = undefined;
+    const exact = this.#matches.findIndex(row => row.name.toLowerCase() === q);
+    this.#index = selected >= 0 ? selected : Math.max(0, exact);
+    this.#draw();
   }
   get choice() { return this.#matches[this.#index]?.name; }
   move(by: number) {
-    this.#index = Math.max(0, Math.min(this.#matches.length - 1, this.#index + by)); this.#draw();
+    this.#index = Math.max(0, Math.min(this.#matches.length - 1, this.#index + by));
+    this.#selection = this.choice;
+    this.#draw();
   }
   pick(id?: unknown) {
     const name = id === undefined ? this.choice : this.buttons.find(row => row.id === id)?.name;
     if (!name) return;
     this.close(); return `/${name} `;
   }
-  close() { this.#query = undefined; this.#matches = []; this.#draw(); }
+  close() { this.#query = undefined; this.#selection = undefined; this.#matches = []; this.#index = 0; this.#draw(); }
   #draw() {
     if (this.buttons.length) this.frame(["del", "slash-menu"]);
     const first = Math.max(0, this.#index - 4), revision = ++this.#revision;

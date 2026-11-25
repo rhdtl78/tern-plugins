@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { SlashMenu } from "./slash";
+import { RpcCommandError, RpcTransportError } from "./rpc";
 import type { Op } from "./surface";
 
 const command = (name: string, source = "extension", syntax = "slash") => ({ name, source, syntax });
@@ -44,8 +45,40 @@ test("only session slash invocations in command position are offered", async () 
   menu.move(1); expect(menu.pick()).toBe("/x "); expect(menu.choice).toBeUndefined();
 });
 
-test("catalog refusal does not capture ordinary editing or selection", async () => {
+test("exact slash defaults without overriding explicit arrow or click selection", async () => {
+  const { menu, deferred, owner, loaded } = setup();
+  const commands = [command("reload-rules"), command("rules"), command("rules-next")];
+  deferred.resolve({ data: { commands } }); await loaded;
+  menu.edit("/RULES", 6);
+  expect(menu.pick()).toBe("/rules ");
+  menu.edit("/rules", 6);
+  menu.move(-1); menu.move(-1);
+  menu.changed(owner.sessionId, commands);
+  expect(menu.pick()).toBe("/reload-rules ");
+  menu.edit("/rules", 6);
+  expect(menu.choice).toBe("rules");
+  expect(menu.pick(menu.buttons.find(row => row.name === "rules-next")?.id)).toBe("/rules-next ");
+});
+
+for (const error of [new RpcCommandError("get_commands", { error: "unknown command" }), new RpcTransportError("disconnected")]) test(`optional catalog ${error.name} does not capture editing`, async () => {
   const { menu, deferred, loaded } = setup(); menu.edit("/",1);
-  deferred.reject(new Error("unknown command")); await loaded;
+  deferred.reject(error); await loaded;
   expect(menu.choice).toBeUndefined(); expect(menu.pick()).toBeUndefined();
+});
+
+test("unexpected request failures reach the slash discovery caller", async () => {
+  const { deferred, loaded } = setup();
+  const error = new TypeError("request failed unexpectedly");
+  deferred.reject(error);
+  await expect(loaded).rejects.toBe(error);
+});
+
+test("render failure after successful discovery reaches the slash discovery caller", async () => {
+  const error = new TypeError("render failed unexpectedly");
+  const menu = new SlashMenu(() => { throw error; });
+  const deferred = Promise.withResolvers<{ data: { commands: unknown[] } }>();
+  const loaded = menu.bind({ sessionId: "one", request: () => deferred.promise });
+  menu.edit("/rules", 6);
+  deferred.resolve({ data: { commands: [command("rules")] } });
+  await expect(loaded).rejects.toBe(error);
 });

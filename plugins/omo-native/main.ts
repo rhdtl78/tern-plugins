@@ -356,8 +356,8 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     refresh();
     if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
     pending.forEach(onRpc);
-    void slash.bind(client);
     void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
+    await slash.bind(client);
 }
 function showModel(value: unknown) {
   currentModel = record(value);
