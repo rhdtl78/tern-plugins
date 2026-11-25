@@ -15,6 +15,7 @@ const model = "Fixture model";
 const warning = "Hot-reloaded: fixture/omo.jsonc";
 const refusal = "fixture refused startup";
 const exit = "RPC exited (7)";
+const clipboardDraft = "Synthetic draft to keep";
 
 function apply(views: Map<string, View>, ops: unknown[]) {
   function add(parent: string, value: unknown) {
@@ -42,7 +43,7 @@ const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
 async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean,
-  scenario: "notice" | "composer" = "notice") {
+  scenario: "notice" | "composer" | "clipboard" = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
     const preload = join(cwd, "tty.ts");
@@ -68,6 +69,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (++prompts !== 1 || fields.message !== "Run fixture" ||
         Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
   }
+  if (${scenario === "clipboard"} && type === "prompt" && fields.message !== ${JSON.stringify(clipboardDraft)}) process.exit(8);
   if (composer && type === "abort" && (++stopCalls !== 1 ||
       fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined)) process.exit(9);
   const data = type === "open_session" ? { sessionId, state: { model: { name: ${JSON.stringify(model)} } } }
@@ -87,7 +89,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 `, { mode: 0o700 });
     const child = Bun.spawn([process.execPath, "--preload", preload, join(import.meta.dir, "main.ts")], {
       cwd, env: { ...process.env, PATH: `${cwd}:${dirname(process.execPath)}:/usr/bin:/bin` },
-      stdin: "pipe", stdout: "pipe", stderr: "inherit", timeout: 3500,
+      stdin: "pipe", stdout: "pipe", stderr: "inherit", timeout: scenario === "clipboard" ? 4500 : 3500,
     });
     const views = new Map<string, View>();
     const send = (value: string) => { child.stdin.write(value); child.stdin.flush(); };
@@ -210,3 +212,30 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
   }, "composer");
   expect(step).toBe(4);
 });
+
+test("Send uses the retained draft after an interrupted clipboard offer expires", async () => {
+  let step = 0;
+  const submit = { ev: "action", id: "send", act: "submit" };
+  await exercise(false, (views, event, key) => {
+    const draft = views.get("draft")?.props;
+    if (step === 0 && draft?.sendable) {
+      step++;
+      key(`\x1b[200~${clipboardDraft}\x1b[201~`);
+    } else if (step === 1 && draft?.text === clipboardDraft) {
+      step++;
+      key("\x1b]5522;type=read:status=OK:pw=interrupted\x1b\\");
+      event(submit);
+    } else if (step === 2 && hasDetail(views, "Wait for the paste to finish")) {
+      step++;
+    } else if (step === 3 && hasDetail(views, "Tern did not complete the paste")) {
+      expect(draft?.text).toBe(clipboardDraft);
+      step++;
+      event(submit);
+    } else if (step === 4 && hasDetail(views, "Fixture turn started")) {
+      step++;
+      return true;
+    }
+    return false;
+  }, "clipboard");
+  expect(step).toBe(5);
+}, 6000);
