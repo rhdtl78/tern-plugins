@@ -61,9 +61,11 @@ export class InputStream {
   #clipboardTimer: ReturnType<typeof setTimeout> | undefined;
   constructor(private readonly onClipboardTimeout?: () => void) {}
 
-  expireClipboardFrame() {
+  expireClipboardFrame(owner?: "transfer") {
     this.#clearClipboardTimer();
-    if (this.#discardOsc === "clipboard" || (!this.#discardOsc && this.#buffer.startsWith(clipboardPrefix))) {
+    const b = this.#buffer;
+    const transferPrefix = owner === "transfer" && b.startsWith("\x1b]") && clipboardPrefix.startsWith(b);
+    if (this.#discardOsc === "clipboard" || (!this.#discardOsc && (b.startsWith(clipboardPrefix) || transferPrefix))) {
       this.#buffer = "";
       this.#discardOsc = undefined;
     }

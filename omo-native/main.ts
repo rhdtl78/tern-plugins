@@ -47,7 +47,7 @@ let attachmentError = "", previews = false, pasting = false, pasteEpoch = 0;
 const clipboard = new Clipboard(packet => process.stdout.write(packet), (mime, bytes) => {
   if (canPaste() || (mime === "text/plain" && (ask?.typed || picker))) void paste(mime, bytes);
 }, (reason, cause) => {
-  if (cause === "timeout") input.expireClipboardFrame();
+  if (cause === "timeout") input.expireClipboardFrame("transfer");
   clipboardError(reason);
 });
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";

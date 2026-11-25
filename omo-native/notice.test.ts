@@ -223,7 +223,11 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
   expect(step).toBe(4);
 });
 
-test.each(["opening OK", "established DATA"])("the first Send includes new typing after interrupted clipboard %s expires", async interrupted => {
+test.each([
+  ["opening OK", ""],
+  ["established DATA", "\x1b]5522;type=read:status=DATA:pw=interrupted:mime=Lg==;dGV4dA=="],
+  ["established prefix before semicolon", "\x1b]5522"],
+])("the first Send includes new typing after interrupted clipboard %s expires", async (interrupted, partial) => {
   let step = 0;
   const submit = { ev: "action", id: "send", act: "submit" };
   await exercise(false, async (views, event, key) => {
@@ -244,7 +248,7 @@ test.each(["opening OK", "established DATA"])("the first Send includes new typin
       event(submit);
     } else if (step === 2 && hasDetail(views, "Wait for the paste to finish")) {
       step++;
-      key("\x1b]5522;type=read:status=DATA:pw=interrupted:mime=Lg==;dGV4dA==");
+      key(partial);
     } else if (step === 3 && hasDetail(views, "Tern did not complete the paste")) {
       expect(draft?.text).toBe(clipboardDraft);
       step++;

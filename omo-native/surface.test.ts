@@ -59,6 +59,46 @@ test("a clipboard frame deadline neither carries over to the next frame nor clea
   } finally { mock.timers.reset(); }
 });
 
+test("only an established transfer can expire a split clipboard OSC prefix", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const prefix = "\x1b]5522;", body = "type=read:status=OK:pw=fixture";
+    for (let cut = 1; cut <= prefix.length; cut++) {
+      let notices = 0;
+      const stream = new InputStream(() => notices++);
+      expect(stream.feed(prefix.slice(0, cut))).toEqual([]);
+      mock.timers.tick(2999);
+      expect(stream.feed(prefix.slice(cut) + body + "\x1b")).toEqual([]);
+      expect(stream.feed("\\")).toEqual([{ kind: "clipboard", value: body }]);
+      mock.timers.tick(3000);
+      expect(notices).toBe(0);
+    }
+    for (let cut = 2; cut < prefix.length; cut++) {
+      const stream = new InputStream();
+      const partial = prefix.slice(0, cut);
+      stream.feed(partial);
+      mock.timers.tick(3000);
+      expect(stream.feed(prefix.slice(cut) + body + "\x07")).toEqual([{ kind: "clipboard", value: body }]);
+      stream.feed(partial);
+      stream.expireClipboardFrame("transfer");
+      expect(stream.feed("x")).toEqual([{ kind: "key", value: "x" }]);
+    }
+  } finally { mock.timers.reset(); }
+});
+
+test.each([
+  ["lone ESC", "\x1b", "", [{ kind: "key", value: "\x1b" }]],
+  ["unrelated OSC", "\x1b]0;title", "\x07x", [{ kind: "key", value: "x" }]],
+  ["split CSI", "\x1b[", "A", [{ kind: "key", value: "\x1b[A" }]],
+  ["split APC", '\x1b_tsp;e;{"ev":', '"focus"}\x1b\\', [{ kind: "event", value: { ev: "focus" } }]],
+  ["bracketed paste", "\x1b[200~first\r", "second\x1b[201~", [{ kind: "paste", value: "first\nsecond" }]],
+] as const)("transfer expiry preserves %s", (_name, before, rest, expected) => {
+  const stream = new InputStream();
+  expect(stream.feed(before)).toEqual([]);
+  stream.expireClipboardFrame("transfer");
+  expect(stream.feed(rest, true)).toEqual(expected);
+});
+
 test("a native UTF-16 replacement and a stale selection never duplicate typing", () => {
   const editor = new Editor();
   editor.reset("x🦉y");
