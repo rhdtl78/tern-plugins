@@ -354,7 +354,16 @@ test("workflow composition uses reported categories; context and total are indep
   expect(workflowUsage({ contextUsage })?.context).toEqual({ label: "Context  0 / 128k", value: 0 });
   expect(workflowUsage({ tokens: { input: "42" }, contextUsage: { tokens: 10, contextWindow: 0 } })).toBeUndefined();
   expect(workflowUsage({ tokens: { total: 14000, input: 9000, output: 2000, cacheRead: 3000, cacheWrite: 0 },
-    contextUsage: { tokens: 3000, contextWindow: 12000 } })).toMatchObject({ center: "14k", context: { value: 0.25 } });
+    contextUsage: { tokens: 3000, contextWindow: 12000 } })).toMatchObject({ center: "25%", context: { value: 0.25 } });
+});
+
+test("cache hit rate divides reads by all input, but not output or the displayed total", () => {
+  const center = (tokens: RpcRecord) => workflowUsage({ tokens })?.center;
+  expect(center({ input: 20, cacheRead: 60, cacheWrite: 20, output: 240, total: 340 })).toBe("60%");
+  expect(center({ input: 20, cacheRead: 0, cacheWrite: 0 })).toBe("0%");
+  expect(center({ input: 0, cacheRead: 20, cacheWrite: 0 })).toBe("100%");
+  expect(center({ input: 0, cacheRead: 0, cacheWrite: 0, output: 9 })).toBeUndefined();
+  expect(center({ input: 20, cacheRead: 10 })).toBeUndefined();
 });
 
 test("workflow USD is reported, never inferred from tokens or rounded to a false zero", () => {
