@@ -91,6 +91,22 @@ type SourceRow = ActivityRow & { readonly startedAt?: number };
 type Source = { readonly count: number; readonly rows: readonly SourceRow[] };
 type TerminalState = { readonly seq: number; readonly bash?: Source; readonly monitor?: Source };
 
+function monitorMatches(source: Source, details: readonly MonitorDetail[]) {
+  const matched = new Map<string, MonitorDetail>();
+  for (const row of source.rows) {
+    if (row.startedAt === undefined || source.rows.filter(other => other.startedAt === row.startedAt).length !== 1) continue;
+    const candidates = details.filter(detail => detail.startedAt === row.startedAt);
+    if (candidates.length === 1 && candidates[0]) matched.set(row.id, candidates[0]);
+  }
+  return matched;
+}
+
+function sameMonitorMembership(previous: Source | undefined, next: Source | undefined): boolean {
+  return previous === next || !!previous && !!next && previous.count === next.count &&
+    previous.rows.length === next.rows.length && previous.rows.every(row =>
+      next.rows.some(other => row.id === other.id && row.startedAt === other.startedAt));
+}
+
 function terminalState(value: unknown, owner: string): TerminalState | undefined {
   const data = object(value);
   if (data?.role !== "root" || data.rootSessionId !== owner || !count(data.seq)) return;
@@ -132,30 +148,27 @@ export class ActivityProjection {
   #taskRevision = 0;
   #tasks?: readonly ActivityRow[];
   #terminal?: TerminalState;
-  #monitors: readonly MonitorDetail[] = [];
+  #monitors?: readonly MonitorDetail[];
+  #monitorJoin?: "pending" | "matched";
 
   constructor(readonly routeId: string, readonly durableId: string) {}
 
   get view(): ActivityView {
     const monitor = this.#terminal?.monitor;
-    const matched = new Set<MonitorDetail>();
-    const monitorRows = monitor?.rows.map(({ startedAt, ...row }): ActivityRow => {
-      const matches = this.#monitors.filter(detail => detail.startedAt === startedAt);
-      const detail = matches[0];
-      if (!detail || matches.length !== 1 || monitor.rows.filter(other => other.startedAt === startedAt).length !== 1) {
-        return row.reference && this.#monitors.length ? { ...row, status: "unknown" } : row;
-      }
-      matched.add(detail);
+    const matched = monitor && this.#monitors ? monitorMatches(monitor, this.#monitors) : undefined;
+    const unconfirmed = monitor?.rows.some(row => !row.reference) || this.#monitors !== undefined;
+    const monitorRows = monitor?.rows.map(({ startedAt: _startedAt, ...row }): ActivityRow => {
+      const detail = matched?.get(row.id);
+      if (!detail) return row.reference && unconfirmed ? { ...row, status: "unknown" } : row;
       return detail.paused ? { ...row, status: "paused" } : row;
     }) ?? [];
     const summary = monitorRows[monitorRows.length - 1];
     let jobsMayBeHigher = monitorRows.some(row => row.reference && row.status === "unknown");
     let monitorJobs = monitorRows.filter(row => row.status === "running").length;
     if (monitor && summary?.status === "unknown" && !summary.reference) {
-      // The two sources use different IDs. Only join an omitted tail when a
-      // complete same-size detail snapshot uniquely matches every listed row.
-      if (matched.size > 0 && matched.size === monitorRows.length - 1 && this.#monitors.length === monitor.count) {
-        const omitted = this.#monitors.filter(detail => !matched.has(detail));
+      if (this.#monitorJoin === "matched" && matched && this.#monitors) {
+        const visible = new Set(matched.values());
+        const omitted = this.#monitors.filter(detail => !visible.has(detail));
         const running = omitted.filter(detail => !detail.paused).length;
         monitorJobs += running;
         monitorRows[monitorRows.length - 1] = {
@@ -191,7 +204,8 @@ export class ActivityProjection {
     this.#taskRevision++;
     this.#tasks = undefined;
     this.#terminal = undefined;
-    this.#monitors = [];
+    this.#monitors = undefined;
+    this.#monitorJoin = undefined;
   }
 
   /** Feed OmoRpc.openSession().state or getState() for this projection's connection. */
@@ -225,6 +239,7 @@ export class ActivityProjection {
         const rows = monitors(frame.data);
         if (!rows) return false;
         this.#monitors = rows;
+        this.#monitorJoin = this.#matchesMonitorMembership(this.#terminal?.monitor) ? "matched" : "pending";
         return true;
       }
       default:
@@ -235,8 +250,21 @@ export class ActivityProjection {
   #setTerminal(value: unknown): boolean {
     const next = terminalState(value, this.durableId);
     if (!next || next.seq <= (this.#terminal?.seq ?? -1)) return false;
+    if (!sameMonitorMembership(this.#terminal?.monitor, next.monitor)) {
+      // OmO emits route-scoped detail before forwarding a membership change.
+      // A detail can join its next changed membership, never a later one after
+      // a contradiction. Keep independently matched visible rows.
+      this.#monitorJoin = this.#monitorJoin === "pending" && this.#matchesMonitorMembership(next.monitor)
+        ? "matched" : undefined;
+    }
     this.#terminal = next;
     return true;
+  }
+
+  #matchesMonitorMembership(source: Source | undefined): boolean {
+    if (!source || !this.#monitors || source.count !== this.#monitors.length) return false;
+    const listed = source.rows.filter(row => row.reference).length;
+    return listed > 0 && monitorMatches(source, this.#monitors).size === listed;
   }
 
   #setTasks(value: unknown): boolean {

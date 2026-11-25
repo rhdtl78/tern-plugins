@@ -218,6 +218,64 @@ test("reconciles truncated owned monitors when complete details match the listed
   expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
 });
 
+function monitorTransition() {
+  const startedAtMs = Date.parse(monitor.items[0].startedAt);
+  const full = Array.from({ length: 34 }, (_, i) => ({ id: `bash_${i}`, startedAtMs: startedAtMs + i, paused: i !== 33 }));
+  const activity = make();
+  const detail = (rows: typeof full) =>
+    activity.observe(extension("terminal_monitor_state", { activeCount: rows.length, monitors: rows }));
+  const lifecycle = (seq: number, activeCount: number) => activity.observe(push(seq, [{
+    ...monitor, activeCount, items: full.slice(0, 32).map((row, i) =>
+      ({ id: `mon_${i}`, startedAt: new Date(row.startedAtMs).toISOString() })),
+  }]));
+  const replacements = full.map((row, i) => i < 32 ? row :
+    { ...row, id: `bash_${i + 10}`, startedAtMs: row.startedAtMs + 1000, paused: true });
+  return { activity, full, detail, lifecycle, replacements };
+}
+
+test("a lifecycle membership change cannot revive old omitted monitor liveness", () => {
+  const { activity, full, detail, lifecycle, replacements } = monitorTransition();
+  detail(full); lifecycle(1, 34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  lifecycle(2, 32);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+  lifecycle(3, 34);
+  expect(activity.view.counts.monitor).toBe(34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+  expect(activity.view.active).toBe(false);
+  detail(replacements);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+  expect(activity.view.active).toBe(false);
+  detail(replacements.map((row, i) => i === 33 ? { ...row, paused: false } : row));
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  expect(activity.view.active).toBe(true);
+});
+
+test("a received empty monitor snapshot does not promote listed registrations to running", () => {
+  const { activity, full, detail, lifecycle } = monitorTransition();
+  lifecycle(1, 34); detail(full);
+  expect(activity.view.active).toBe(true);
+  expect(detail([])).toBe(true);
+  expect(activity.view.counts.monitor).toBe(34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0, jobsMayBeHigher: true });
+  expect(activity.view.active).toBe(false);
+  expect(activity.view.rows.every(row => row.status === "unknown")).toBe(true);
+  activity.observe(push(2, []));
+  expect(activity.view.counts.monitor).toBe(0);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 0 });
+});
+
+test("detail-first producer transitions retain confirmed visible and fresh omitted liveness", () => {
+  const { activity, full, detail, lifecycle, replacements } = monitorTransition();
+  const visibleLive = (rows: typeof full) => rows.map((row, i) => i === 0 ? { ...row, paused: false } : row);
+  detail(visibleLive(full.slice(0, 32))); lifecycle(1, 32);
+  expect(activity.view.running.jobs).toBe(1);
+  detail(visibleLive(replacements)); lifecycle(2, 34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+  lifecycle(3, 34);
+  expect(activity.view.running).toEqual({ agents: 0, jobs: 1 });
+});
+
 test("ignores widgets including live task duplicates and retained done or fallback bash", () => {
   const activity = make();
   activity.observe(update([agent]));
