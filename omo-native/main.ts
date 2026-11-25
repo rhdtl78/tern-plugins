@@ -39,6 +39,7 @@ let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
 let workflowAvailable = false;
 let toastId: string | undefined;
+const pendingRows = new Set<string>();
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
 const waiting = new Map<string, RpcRecord>();
 let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
@@ -66,6 +67,23 @@ function refresh() {
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
 function showStatus(text: typeof status) { status = text; refresh(); }
+function showPending(ordered: unknown) {
+  if (!Array.isArray(ordered)) return;
+  const ops: Op[] = [];
+  for (const id of pendingRows) ops.push(["del", id]);
+  pendingRows.clear();
+  // The engine provides submission order and a distinct id even for identical text.
+  for (const entry of ordered) {
+    const { queuedId, mode, text } = record(entry);
+    const label = mode === "steer" ? "Steering" : mode === "followUp" ? "Queue" : undefined;
+    if (!label || typeof queuedId !== "string" || !queuedId || typeof text !== "string") continue;
+    const id = `pending.${queuedId}`;
+    if (pendingRows.has(id)) continue;
+    pendingRows.add(id);
+    ops.push(add("pending-messages", node(id, "text", { text: `${label}: ${plain(text)}` })));
+  }
+  frame(["set", "pending-messages", { hidden: pendingRows.size === 0 }], ...ops);
+}
 function notify(text: string, tone: "info" | "error" = "info") {
   const message = plain(text).trim();
   if (!message) return;
@@ -78,6 +96,7 @@ function notify(text: string, tone: "info" | "error" = "info") {
 function fail(e: unknown) {
   ready = false; busy = false;
   composerMode.clear();
+  showPending([]);
   quota?.close(); quota = undefined;
   background = undefined;
   unsubscribe?.(); workflow.disconnect();
@@ -147,6 +166,7 @@ function onRpc(e: RpcRecord) {
   if (closing) return;
   if (e.type === "commands_changed") { slash.changed(e.sessionId, e.commands); return; }
   if (e.type === "session_closed") { fail("OmO session closed"); return; }
+  if (e.type === "queue_update") { showPending(e.ordered); return; }
   void quota?.event(e);
   if (e.type === "model_changed" && Object.keys(record(e.model)).length) showModel(e.model);
   if (background?.observe(e)) {
@@ -234,6 +254,20 @@ async function start(hello: RpcRecord) {
       left: 22px;
       pointer-events: none;
     }
+    .sf-col[data-id="dock"]:has([data-id^="pending."]) .sf-row[data-id="session-feedback"] {
+      position: static;
+    }
+    .sf-scroll[data-id="pending-messages"] {
+      align-self: center;
+      width: min(100%, 736px);
+      border: 1px solid var(--l3);
+      border-radius: 12px;
+      padding: 4px 10px;
+    }
+    .sf-text[data-id^="pending."] {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .sf-text[data-id="session-background-counts"] {
       color: var(--t2);
       font-size: .875em;
@@ -287,6 +321,7 @@ async function start(hello: RpcRecord) {
     ]),
   ])), add(surface, node("dock", "col", {}, [
     node("dialogs", "col"),
+    node("pending-messages", "scroll", { hidden: true, max: { h: "6lines" } }),
     node("composer", "col", { role: "omp.editor" }, [
       node("composer-mode", "text", { role: "normal", hidden: true }),
       node("session-feedback", "row", { align: "center", gap: "sm" }, [
@@ -351,6 +386,7 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (quotaAvailable) quota = new UsageMeter(client, renderUsage(screen));
     for (const message of history) transcript.message(message);
     busy = state.isStreaming === true; ready = true; status = "";
+    showPending(state.ordered);
     showModel(state.model);
     frame(["focus", "draft"]);
     refresh();

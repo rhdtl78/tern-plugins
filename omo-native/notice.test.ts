@@ -42,7 +42,7 @@ const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
 async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean,
-  scenario: "notice" | "composer" = "notice") {
+  scenario: "notice" | "composer" | "queue" = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
     const preload = join(cwd, "tty.ts");
@@ -53,8 +53,26 @@ const sessionId = "notice-test";
 const send = value => console.log(JSON.stringify({ sessionId, ...value }));
 let prompts = 0, stopCalls = 0;
 const composer = ${scenario === "composer"};
+const queue = ${scenario === "queue"};
+let ordered = [], next = 0, turn = "turn-one";
+const snapshot = () => send({ type: "queue_update", ordered });
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, type, ...fields } = JSON.parse(line);
+  if (queue && (type === "steer" || type === "follow_up")) {
+    if (fields.expectedTurnId !== turn) process.exit(10);
+    if (fields.message === "refused") {
+      send({ id, type: "response", command: type, success: false, error: "fixture queue refused" });
+    } else {
+      send({ id, type: "response", command: type, success: true, data: { disposition: "queued" } });
+      // Keep the acknowledgement and engine queue update observable as distinct states.
+      if (next === 0) send({ type: "extension_ui_request", method: "notify", message: "Fixture acknowledged" });
+      await Bun.sleep(100);
+      ordered.push({ queuedId: "q_" + ++next, mode: type === "steer" ? "steer" : "followUp",
+        text: fields.message, enqueueOrder: next, revision: 1 });
+      snapshot();
+    }
+    continue;
+  }
   if (type === "open_session" && ${rejectOpen}) {
     send({ id, type: "response", command: type, success: false, error: ${JSON.stringify(refusal)} });
     continue;
@@ -72,7 +90,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined)) process.exit(9);
   const data = type === "open_session" ? { sessionId, state: { model: { name: ${JSON.stringify(model)} } } }
     : type === "get_messages" ? { messages: [] }
-    : type === "get_state" ? { isStreaming: true, currentTurnId: "turn-one" }
+    : type === "get_state" ? { isStreaming: true, currentTurnId: turn, ordered }
     : type === "abort" ? { idle: !composer } : {};
   send({ id, type: "response", command: type, success: true, data });
   if (type === "get_messages") send({ type: "extension_ui_request", method: "notify",
@@ -82,7 +100,31 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ type: "agent_start" });
     send({ type: "extension_ui_request", method: "notify", message: "Fixture turn started" });
   }
-  if (type === "abort" && !composer) send({ type: "agent_idle" });
+  if (queue && type === "abort") {
+    if (++stopCalls === 1) {
+      // Stop settles the turn but does not drain the queue. A later turn consumes
+      // just one of two equal-text messages, with the queue update coming first.
+      send({ type: "agent_idle" });
+      await Bun.sleep(100);
+      turn = "turn-two";
+      send({ type: "agent_start" });
+      await Bun.sleep(100);
+      const delivered = ordered[1];
+      ordered = ordered.filter(row => row !== delivered);
+      snapshot();
+      const message = { role: "user", content: delivered.text };
+      send({ type: "message_start", message });
+      send({ type: "message_end", message });
+    } else {
+      // Engine discards remaining entries without adding user messages.
+      for (const _ of [...ordered]) {
+        ordered = ordered.slice(1);
+        snapshot();
+        await Bun.sleep(100);
+      }
+    }
+  }
+  if (type === "abort" && !composer && !queue) send({ type: "agent_idle" });
 }
 `, { mode: 0o700 });
     const child = Bun.spawn([process.execPath, "--preload", preload, join(import.meta.dir, "main.ts")], {
@@ -209,4 +251,69 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
     return false;
   }, "composer");
   expect(step).toBe(4);
+});
+
+test("projects the engine's steering and follow-up queue above the composer", async () => {
+  let step = 0, sawAckWithoutRows = false;
+  await exercise(false, (views, event, key) => {
+    const pending = views.get("pending-messages");
+    const rows = [...views].filter(([, view]) => view.parent === "pending-messages")
+      .map(([id, view]) => [id, view.props.text]);
+    const messages = withText(views, "same").filter(view => view.parent !== "pending-messages");
+    const draft = views.get("draft")?.props;
+    const ids = rows.map(([id]) => id);
+    if (step === 0 && withText(views, warning).length) {
+      expect(pending?.props.hidden).toBe(true);
+      expect([...views.keys()].indexOf("pending-messages")).toBeLessThan([...views.keys()].indexOf("composer"));
+      expect(pending?.parent).toBe("dock");
+      step++;
+      event({ ev: "send", id: "draft", text: "Run fixture" });
+    } else if (step === 1 && withText(views, "Fixture turn started").length) {
+      step++;
+      key("first\x1b[13;5u");
+    } else if (step === 2 && !rows.length && withText(views, "Fixture acknowledged").length) {
+      sawAckWithoutRows = pending?.props.hidden === true && draft?.text === "";
+    } else if (step === 2 && ids.length === 1) {
+      expect(rows).toEqual([["pending.q_1", "Queue: first"]]);
+      expect(pending?.props.hidden).toBe(false);
+      step++;
+      key("same\x1b[13;9u");
+    } else if (step === 3 && ids.length === 2) {
+      expect(rows).toEqual([["pending.q_1", "Queue: first"], ["pending.q_2", "Steering: same"]]);
+      step++;
+      key("same\x1b[13;5u");
+    } else if (step === 4 && ids.length === 3) {
+      expect(rows[2]).toEqual(["pending.q_3", "Queue: same"]);
+      expect(messages).toHaveLength(0);
+      step++;
+      key("refused\x1b[13;9u" + "new draft");
+    } else if (step === 5 && hasDetail(views, "fixture queue refused")) {
+      expect(draft?.text).toBe("refused\nnew draft");
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 6 && draft?.sendable) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      expect(draft.text).toBe("refused\nnew draft");
+      step++;
+    } else if (step === 7 && messages.length) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_3"]);
+      expect(messages).toHaveLength(1);
+      expect(draft?.text).toBe("refused\nnew draft");
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 8 && ids.length === 1) {
+      expect(ids).toEqual(["pending.q_3"]);
+      step++;
+    } else if (step === 9 && pending?.props.hidden) {
+      expect(rows).toEqual([]);
+      expect(messages).toHaveLength(1);
+      expect(draft?.text).toBe("refused\nnew draft");
+      step++;
+      return true;
+    }
+    return false;
+  }, "queue");
+  expect(sawAckWithoutRows).toBe(true);
+  expect(step).toBe(10);
 });
