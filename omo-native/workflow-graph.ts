@@ -1,8 +1,13 @@
 import { workflowLayers, type Step } from "./workflow-projection";
 
 const width = 480, cardHeight = 78, rowGap = 32, laneGap = 4;
-const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
-  s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
+export function formatNodeRuntime(ms: Step["runtimeMs"]) {
+  if (ms === undefined) return "";
+  const seconds = Math.floor(ms / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
+  return `${hours ? `${hours}h ` : ""}${hours || minutes ? `${minutes}m ` : ""}${seconds % 60}s`;
+}
 
 export function graph(steps: readonly Step[], dark: boolean, selected = "") {
   if (!steps.length || steps.length > 12 || steps.reduce((n, s) => n + s.needs.length, 0) > 24) return;
@@ -56,7 +61,7 @@ export function graph(steps: readonly Step[], dark: boolean, selected = "") {
     if (!point) return [];
     const [x, y, wide] = point;
     const id = `workflow-card-${i}`;
-    const state = [step.status, runtime(step)].filter(Boolean).join(" · ");
+    const state = [step.status, formatNodeRuntime(step.runtimeMs)].filter(Boolean).join(" · ");
     const route = step.route?.name || "";
     return [{ id, left: x - wide / 2, top: y, width: wide, height: cardHeight,
       label: step.label, route, state, status: step.status,
