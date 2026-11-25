@@ -1,6 +1,7 @@
 const formats = [ "text/uri-list", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain" ];
 const base64 = (text: string) => Buffer.from(text).toString("base64");
 export const attachmentLimit = 4 * 1024 * 1024;
+export const clipboardTimeoutNotice = "Tern did not complete the paste.";
 
 type Phase = "offer" | "read";
 type Transfer = {
@@ -32,7 +33,7 @@ export class Clipboard {
     this.#clear(phase);
     const timer = setTimeout(() => {
       this.#clear(phase);
-      this.error("Tern did not complete the paste.", "timeout");
+      this.error(clipboardTimeoutNotice, "timeout");
     }, 3000);
     this.#transfers[phase] = { key, chunks: [], size: 0, mime, timer };
   }

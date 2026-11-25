@@ -43,7 +43,7 @@ const withText = (views: Views, text: string) => visible(views).filter(view => v
 const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
-async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean,
+async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean | Promise<boolean>,
   scenario: "notice" | "composer" | "clipboard" = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
@@ -113,7 +113,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           const { ops } = record(JSON.parse(packet));
           if (!Array.isArray(ops)) continue;
           apply(views, ops);
-          if (observe(views, event, send)) send("\x04");
+          if (await observe(views, event, send)) send("\x04");
         }
       }
       const code = await child.exited;
@@ -223,17 +223,24 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
   expect(step).toBe(4);
 });
 
-test("the first Send includes new typing after an interrupted clipboard frame expires", async () => {
+test.each(["opening OK", "established DATA"])("the first Send includes new typing after interrupted clipboard %s expires", async interrupted => {
   let step = 0;
   const submit = { ev: "action", id: "send", act: "submit" };
-  await exercise(false, (views, event, key) => {
+  await exercise(false, async (views, event, key) => {
     const draft = views.get("draft")?.props;
     if (step === 0 && draft?.sendable) {
       step++;
       key(`\x1b[200~${clipboardDraft}\x1b[201~`);
     } else if (step === 1 && draft?.text === clipboardDraft) {
       step++;
-      key("\x1b]5522;type=read:status=OK:pw=interrupted\x1b\\");
+      const offer = "\x1b]5522;type=read:status=OK:pw=interrupted";
+      if (interrupted === "opening OK") {
+        key(offer);
+        // Attempt the first Send after the deadline even when no timeout notice arrives.
+        await Bun.sleep(3600);
+        step = 4;
+        key(clipboardSuffix);
+      } else key(offer + "\x1b\\");
       event(submit);
     } else if (step === 2 && hasDetail(views, "Wait for the paste to finish")) {
       step++;

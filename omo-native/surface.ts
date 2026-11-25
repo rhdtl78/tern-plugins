@@ -58,14 +58,20 @@ const clipboardPrefix = "\x1b]5522;";
 export class InputStream {
   #buffer = "";
   #discardOsc: "clipboard" | "other" | undefined;
+  #clipboardTimer: ReturnType<typeof setTimeout> | undefined;
+  constructor(private readonly onClipboardTimeout?: () => void) {}
 
   expireClipboardFrame() {
-    const b = this.#buffer;
-    if (this.#discardOsc === "clipboard" || (!this.#discardOsc && b.startsWith("\x1b]") &&
-        (b.startsWith(clipboardPrefix) || clipboardPrefix.startsWith(b)))) {
+    this.#clearClipboardTimer();
+    if (this.#discardOsc === "clipboard" || (!this.#discardOsc && this.#buffer.startsWith(clipboardPrefix))) {
       this.#buffer = "";
       this.#discardOsc = undefined;
     }
+  }
+
+  #clearClipboardTimer() {
+    clearTimeout(this.#clipboardTimer);
+    this.#clipboardTimer = undefined;
   }
 
   feed(chunk: string, escapeTimeout = false): Input[] {
@@ -77,14 +83,20 @@ export class InputStream {
       if (this.#discardOsc || b.startsWith("\x1b]")) {
         const offset = this.#discardOsc ? 0 : 2;
         const end = /\x07|\x1b\\/.exec(b.slice(offset));
+        const clipboard = this.#discardOsc ? this.#discardOsc === "clipboard" : b.startsWith(clipboardPrefix);
         if (!end) {
+          if (clipboard) this.#clipboardTimer ??= setTimeout(() => {
+            this.expireClipboardFrame();
+            this.onClipboardTimeout?.();
+          }, 3000).unref();
           if (b.length > 16_384 || this.#discardOsc) {
-            this.#discardOsc ??= b.startsWith(clipboardPrefix) ? "clipboard" : "other";
+            this.#discardOsc ??= clipboard ? "clipboard" : "other";
             this.#buffer = b.endsWith("\x1b") ? "\x1b" : "";
           }
           break;
         }
-        if (!this.#discardOsc && b.startsWith(clipboardPrefix))
+        this.#clearClipboardTimer();
+        if (!this.#discardOsc && clipboard)
           events.push({ kind: "clipboard", value: end.index <= 16_384 ? b.slice(clipboardPrefix.length, offset + end.index) : "" });
         else if (this.#discardOsc) events.push({ kind: "clipboard", value: "" });
         this.#discardOsc = undefined;

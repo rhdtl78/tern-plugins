@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { mock } from "node:test";
 import { dialog } from "./dialog";
 import { Editor } from "./editor";
 import { InputStream, packets, type Op } from "./surface";
@@ -38,6 +39,24 @@ test("fragmented paste cannot forge a Tern action or submit a multiline draft", 
   const inputs = [...`\x1b[200~${paste}\x1b[201~${action}`].flatMap(c => stream.feed(c));
   expect(inputs).toEqual([{ kind: "paste", value: paste.replace("\r", "\n") },
     { kind: "event", value: { ev: "action", act: "choose" } }]);
+});
+
+test("a clipboard frame deadline neither carries over to the next frame nor clears bracketed paste", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let expirations = 0;
+    const stream = new InputStream(() => expirations++);
+    const osc = "\x1b]5522;";
+    expect(stream.feed(osc + "first")).toEqual([]);
+    mock.timers.tick(2500);
+    expect(stream.feed("\x1b\\" + osc + "second")).toEqual([{ kind: "clipboard", value: "first" }]);
+    mock.timers.tick(500);
+    expect(expirations).toBe(0);
+    expect(stream.feed("\x07\x1b[200~first\r")).toEqual([{ kind: "clipboard", value: "second" }]);
+    mock.timers.tick(3000);
+    expect(stream.feed("second\x1b[201~")).toEqual([{ kind: "paste", value: "first\nsecond" }]);
+    expect(expirations).toBe(0);
+  } finally { mock.timers.reset(); }
 });
 
 test("a native UTF-16 replacement and a stale selection never duplicate typing", () => {

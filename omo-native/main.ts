@@ -15,10 +15,11 @@ import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
 import { ComposerMode } from "./composer-mode";
-import { Clipboard } from "./clipboard";
+import { Clipboard, clipboardTimeoutNotice } from "./clipboard";
 import { attachmentCard, attachmentCount, attachmentsCss, clipboardFile, clipboardImage, fileEntries, sendBlock, type Attachment } from "./attachments";
 
-const screen = new Surface(), draft = new Editor(), input = new InputStream();
+const screen = new Surface(), draft = new Editor();
+const input = new InputStream(() => { if (!clipboard.pending) clipboardError(clipboardTimeoutNotice); });
 const composerMode = new ComposerMode();
 let editor = draft;
 const workflowIntent = "workflow-open-intent";
@@ -45,12 +46,16 @@ const attachments = new Map<string, Attachment>();
 let attachmentError = "", previews = false, pasting = false, pasteEpoch = 0;
 const clipboard = new Clipboard(packet => process.stdout.write(packet), (mime, bytes) => {
   if (canPaste() || (mime === "text/plain" && (ask?.typed || picker))) void paste(mime, bytes);
-}, (reason, cause) => { if (cause === "timeout") input.expireClipboardFrame(); if (canPaste()) { attachmentError = reason; refresh(); } });
+}, (reason, cause) => {
+  if (cause === "timeout") input.expireClipboardFrame();
+  clipboardError(reason);
+});
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
 const waiting = new Map<string, RpcRecord>();
 let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
 const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 const canPaste = () => ready && !closing && !picker && !ask;
+function clipboardError(reason: string) { if (canPaste()) { attachmentError = reason; refresh(); } }
 
 async function paste(mime: string, bytes: Buffer) {
   if (mime === "text/plain") {
@@ -144,7 +149,7 @@ function fail(e: unknown) {
 async function close() {
   if (closing) return;
   closing = true; clearTimeout(timer); clearTimeout(esc); unsubscribe?.();
-  cancelPaste();
+  cancelPaste(); input.expireClipboardFrame();
   quota?.close();
   workflow.disconnect();
   workflowLaunch?.abort();
