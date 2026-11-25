@@ -15,6 +15,8 @@ import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
 import { ComposerMode } from "./composer-mode";
+import { Clipboard } from "./clipboard";
+import { attachmentCard, attachmentCount, attachmentsCss, clipboardFile, clipboardImage, fileEntries, sendBlock, type Attachment } from "./attachments";
 
 const screen = new Surface(), draft = new Editor(), input = new InputStream();
 const composerMode = new ComposerMode();
@@ -39,13 +41,56 @@ let ask: ReturnType<typeof dialog> | undefined;
 let picker: Picker | undefined, currentModel: RpcRecord = {};
 let workflowAvailable = false;
 let toastId: string | undefined;
+const attachments = new Map<string, Attachment>();
+let attachmentError = "", previews = false, pasting = false, pasteEpoch = 0;
+const clipboard = new Clipboard(packet => process.stdout.write(packet), (mime, bytes) => {
+  if (canPaste() || (mime === "text/plain" && (ask?.typed || picker))) void paste(mime, bytes);
+}, reason => { if (canPaste()) { attachmentError = reason; refresh(); } });
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
 const waiting = new Map<string, RpcRecord>();
 let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
 const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+const canPaste = () => ready && !closing && !picker && !ask;
+
+async function paste(mime: string, bytes: Buffer) {
+  if (mime === "text/plain") {
+    handle({ kind: "paste", value: bytes.toString("utf8").replace(/\r\n?/g, "\n") });
+    return;
+  }
+  if (pasting || submitting) { notify("Try pasting again after the current operation finishes."); return; }
+  const room = attachmentCount - attachments.size;
+  const entries = mime === "text/uri-list" ? fileEntries(bytes) : undefined;
+  attachmentError = !room || (entries?.length ?? 0) > room
+    ? `Attach up to ${attachmentCount} items at a time.` : entries?.length === 0 ? "No local files in this paste." : "";
+  if (!room) { refresh(); return; }
+  const epoch = pasteEpoch;
+  pasting = true; refresh();
+  try {
+    const files = entries
+      ? await Promise.all(entries.slice(0, room).map(uri => clipboardFile(uri, previews)))
+      : [await clipboardImage(mime, bytes, previews)];
+    if (!canPaste() || epoch !== pasteEpoch) return;
+    for (const file of files) {
+      const id = `attachment${++seq}`;
+      attachments.set(id, file);
+      let blob: string | undefined;
+      if (file.preview) {
+        blob = new Bun.CryptoHasher("sha256").update(file.preview).digest("hex");
+        process.stdout.write(`\x1b_tsp;b;mime=image/png;${file.preview.toString("base64")}\x1b\\`);
+      }
+      frame(attachmentCard(id, file, blob));
+    }
+  } finally {
+    pasting = false;
+    if (!closing) refresh();
+  }
+}
+
+function cancelPaste() { pasteEpoch++; clipboard.cancel(); }
 
 function refresh() {
   const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
+  const reason = attachmentError || (!attachments.size ? undefined : sendBlock([...attachments.values()], currentModel.input));
   if (!canSend) slash.close();
   const backgroundView = background?.view;
   const { agents, jobs, jobsMayBeHigher } = backgroundView?.running ?? { agents: 0, jobs: 0 };
@@ -58,6 +103,8 @@ function refresh() {
       : border === "ulw-preview" ? "Message OMO · ULW preview"
       : border === "research-preview" ? "Message OMO · Research preview" : "Message OMO" }],
     ["set", "composer-mode", { role: border ?? "normal" }],
+    ["set", "attachments", { hidden: !!ask || !attachments.size }],
+    ["set", "attachment-error", { hidden: !!ask || !reason, text: reason ?? "" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
     ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
@@ -97,13 +144,14 @@ function fail(e: unknown) {
 async function close() {
   if (closing) return;
   closing = true; clearTimeout(timer); clearTimeout(esc); unsubscribe?.();
+  cancelPaste();
   quota?.close();
   workflow.disconnect();
   workflowLaunch?.abort();
   try { await Promise.all([rpc?.close(), workflowLifetime]); }
   finally {
     if (live) screen.send("x", { id: surface, keep: !resume || ready });
-    process.stdout.write("\x1b[<u\x1b[?2004l");
+    process.stdout.write("\x1b[<u\x1b[?2004l\x1b[?5522l");
     await Bun.sleep(60);
     process.stdin.setRawMode(false); process.stdin.pause();
     process.exit(process.exitCode ?? 0);
@@ -117,6 +165,7 @@ function nextDialog() {
   removePicker();
   waiting.delete(id);
   ask = dialog(req, ++seq);
+  cancelPaste();
   editor = new Editor();
   if (!ask.supported) {
     notify(`Cannot display ${string(req.method)} in this surface; cancelling.`, "error");
@@ -186,8 +235,9 @@ async function start(hello: RpcRecord) {
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
   screen.send("o", { id: surface, mode: "inline", title: "OMO", role: "omp.session" });
   let authorIcon: string | undefined;
-  if (Array.isArray(hello.features) && hello.features.includes("blobs") &&
-    Array.isArray(hello.kinds) && hello.kinds.includes("image")) {
+  previews = Array.isArray(hello.features) && hello.features.includes("blobs") &&
+    Array.isArray(hello.kinds) && hello.kinds.includes("image");
+  if (previews) {
     const bytes = Buffer.from(omoIcon);
     authorIcon = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
     process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
@@ -278,6 +328,7 @@ async function start(hello: RpcRecord) {
       color: #fff;
     }
     .sf-row[data-id="footer"] > .sf-button[data-id="send"]:hover { opacity: .9; }
+    ${attachmentsCss}
   ` });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [
@@ -294,6 +345,8 @@ async function start(hello: RpcRecord) {
         node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
         node("session-background-counts", "text", { hidden: true }),
       ]),
+      node("attachments", "col", { hidden: true }),
+      node("attachment-error", "text", { hidden: true, role: "omp.attachment.meta" }),
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
       ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
@@ -372,6 +425,7 @@ function removePicker() {
 function openPicker(kind: Picker["kind"]) {
   if (picker || ask || (kind === "models" && (!ready || busy))) return;
   const p = picker = new Picker(kind, `pick${++seq}`);
+  cancelPaste();
   frame(add("layer", node(p.id, "picker", p.props(true))), ["focus", null]);
   refresh(); void loadPicker(p);
 }
@@ -427,12 +481,20 @@ function pickerInput(p: Picker, i: Input) {
 async function submit(mode: SubmitMode, supplied?: string) {
   const text = supplied ?? editor.text;
   if (ask) { if (mode === "prompt" && ask.typed && text.trim()) await answer(ask.typed(text)); return; }
-  if (!ready || !rpc || submitting || stopping || !text.trim()) return;
+  if (!ready || !rpc || picker || submitting || stopping || (!text.trim() && !attachments.size)) return;
+  if (pasting || clipboard.pending) { notify("Wait for the paste to finish."); return; }
   if (mode === "prompt" && busy) {
     if (supplied === undefined) notify("Turn running. Use ⌘+Enter to steer or Ctrl+Enter to queue.");
     return;
   }
   if (mode !== "prompt" && !busy) return;
+  const reason = sendBlock([...attachments.values()], currentModel.input);
+  if (reason) { notify(`${reason} Remove unsupported attachments before sending.`, "error"); return; }
+  if (attachments.size && /^\/[\p{L}\p{N}_:-][\p{L}\p{N}_.:-]*(?:\s|$)/u.test(text.trimStart())) {
+    notify("Send attachments with a message, not a slash command.", "error"); return;
+  }
+  const images = [...attachments.values()].flatMap(file => file.image ? [file.image] : []);
+  const fields = images.length ? { images } : {};
   const startedAt = activity, cursor = supplied === undefined ? editor.cursor : text.length;
   submitting = true;
   if (supplied === undefined || supplied === editor.text) editor.reset("");
@@ -440,7 +502,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
   else refresh();
   try {
     if (mode === "prompt") {
-      const reply = await rpc.prompt(text);
+      const reply = await rpc.prompt(text, fields);
       // A slash command may finish inside an extension without any agent_idle.
       if (record(reply.data).disposition === "handled") {
         void workflow.refreshPlan();
@@ -452,8 +514,10 @@ async function submit(mode: SubmitMode, supplied?: string) {
       const expectedTurnId = string(state.currentTurnId);
       if (startedAt !== activity || !expectedTurnId || state.isStreaming !== true || stopping || closing)
         throw new Error("The active turn changed before the message could be sent.");
-      await rpc.request(mode, { message: text, expectedTurnId });
+      await rpc.request(mode, { message: text, expectedTurnId, ...fields });
     }
+    for (const id of attachments.keys()) frame(["del", id]);
+    attachments.clear(); attachmentError = "";
   } catch (e) {
     if (mode === "prompt" && startedAt === activity) { busy = false; status = ""; composerMode.clear(); }
     // A dialog may have taken the editor while admission was pending.
@@ -547,6 +611,10 @@ function insertCommand(id?: unknown) {
 function handle(i: Input) {
   if (closing) return;
   if (i.kind === "key" && (i.value === "\x04" || i.value === "\x1b[100;5u")) { void close(); return; }
+  if (i.kind === "clipboard") {
+    if (canPaste() || picker || ask?.typed) clipboard.receive(i.value, !canPaste());
+    return;
+  }
   if (i.kind === "event") {
     const e = i.value;
     if (!live && e.r === "hello" && e.v === 1) { void start(e); return; }
@@ -563,10 +631,15 @@ function handle(i: Input) {
       case "send":
         if (e.id === "draft" && !ask) {
           if (slash.choice) insertCommand();
-          else void submit("prompt", string(e.text));
+          else void submit("prompt", typeof e.text === "string" ? e.text : undefined);
         }
         return;
       case "action":
+        if (e.act === "remove-attachment" && typeof e.id === "string" && e.id.endsWith(".remove") &&
+            !ask && !submitting && attachments.delete(e.id.slice(0, -7))) {
+          frame(["del", e.id.slice(0, -7)], ["focus", "draft"]); attachmentError = ""; refresh();
+          return;
+        }
         if (e.act === "insert-command" && typeof e.id === "string") { insertCommand(e.id); return; }
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
         if (e.id === "model" && e.act === "models") openPicker("models");
@@ -610,7 +683,7 @@ if (args[0] === "--workflow-pane" && args.length === 6 && args[1] && /^[a-f0-9]{
   for (const signal of ["SIGINT","SIGHUP","SIGTERM"] as const) process.once(signal, close);
   process.stdout.on("error", close);
   screen.send("q", { q: "hello", app: "omo", v: [1], features: ["edit","send","undo"] });
-  process.stdout.write("\x1b[c\x1b[?2004h\x1b[>1u");
+  process.stdout.write("\x1b[c\x1b[?2004h\x1b[?5522h\x1b[>1u");
   timer = setTimeout(() => {
     process.stderr.write("OMO Native: Tern did not negotiate a surface. Enable Native program surfaces and reopen this pane.\r\n");
     process.exitCode = 1; void close();

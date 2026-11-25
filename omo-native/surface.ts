@@ -49,18 +49,35 @@ export class Surface {
   }
 }
 
-export type Input = { kind: "event"; value: RpcRecord } | { kind: "key" | "paste"; value: string };
+export type Input = { kind: "event"; value: RpcRecord } |
+  { kind: "clipboard"; value: string } | { kind: "key" | "paste"; value: string };
 // PTY reads do not preserve message boundaries. Never parse pasted bytes as
 // terminal replies or commands, even when the paste contains literal APCs.
 export class InputStream {
   #buffer = "";
+  #discardOsc = false;
   feed(chunk: string, escapeTimeout = false): Input[] {
     this.#buffer += chunk;
     const events: Input[] = [];
     while (this.#buffer) {
       const b = this.#buffer;
       let size: number;
-      if (b.startsWith("\x1b[200~")) {
+      if (this.#discardOsc || b.startsWith("\x1b]")) {
+        const offset = this.#discardOsc ? 0 : 2;
+        const end = /\x07|\x1b\\/.exec(b.slice(offset));
+        if (!end) {
+          if (b.length > 16_384 || this.#discardOsc) {
+            this.#discardOsc = true;
+            this.#buffer = b.endsWith("\x1b") ? "\x1b" : "";
+          }
+          break;
+        }
+        if (!this.#discardOsc && b.startsWith("\x1b]5522;"))
+          events.push({ kind: "clipboard", value: end.index <= 16_384 ? b.slice(7, offset + end.index) : "" });
+        else if (this.#discardOsc) events.push({ kind: "clipboard", value: "" });
+        this.#discardOsc = false;
+        size = offset + end.index + end[0].length;
+      } else if (b.startsWith("\x1b[200~")) {
         const end = b.indexOf("\x1b[201~", 6);
         if (end < 0) break;
         events.push({ kind: "paste", value: b.slice(6, end).replace(/\r\n?/g, "\n") });

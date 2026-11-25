@@ -61,7 +61,7 @@ export class Editor {
       this.#replace(from, to, text, cursor);
     } else if (input.kind === "paste") {
       this.#replace(this.cursor, this.cursor, plain(input.value));
-    } else {
+    } else if (input.kind === "key") {
       const left = this.cursor - ([...this.text.slice(0, this.cursor)].pop()?.length ?? 0);
       const right = this.cursor + (String.fromCodePoint(this.text.codePointAt(this.cursor) ?? 0).length);
       switch (input.value) {
@@ -89,7 +89,7 @@ export class Editor {
           if (!/^[^\p{Cc}]$/u.test(input.value)) return;
           this.#replace(this.cursor, this.cursor, input.value);
       }
-    }
+    } else return;
     return "edit";
   }
 }
