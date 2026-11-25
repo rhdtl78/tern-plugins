@@ -44,7 +44,7 @@ export function todoPhases(details: unknown): readonly ChecklistPhase[] | undefi
   return checklist;
 }
 
-type TurnRecord = { readonly id: string; readonly assistant: boolean };
+type TurnRecord = { readonly id: string; readonly assistant: boolean; reply?: true };
 type TurnGroup = { readonly records: readonly TurnRecord[]; collapsed: boolean };
 
 /** History and live tool events share one identity per call, including its disclosure. */
@@ -66,12 +66,14 @@ export class Transcript {
   finishTurn() {
     const records = this.#turn;
     this.#turn = undefined;
-    if (!records?.length) return;
-    const id = this.#summaryId(records[0]!.id);
-    // Only a trailing assistant message is the reply; tool-bearing steps are intermediate.
-    if (records.at(-1)?.assistant) records.pop();
-    if (!records.length) { this.frame(["del", id]); return; }
-    const group = { records, collapsed: true };
+    const first = records?.[0];
+    if (!records || !first) return;
+    const id = this.#summaryId(first.id);
+    // Keep a trailing answer or error even when the engine omits completion metadata.
+    if (records[records.length - 1]?.assistant) records.pop();
+    const activity = records.filter(item => !item.reply);
+    if (!activity.length) { this.frame(["del", id]); return; }
+    const group = { records: activity, collapsed: true };
     this.#groups.set(id, group);
     this.#showGroup(id, group, true);
   }
@@ -181,9 +183,14 @@ export class Transcript {
       case "user": this.#text(body(m.content), false); break;
       case "assistant": {
         this.#text(body(m.content) || plain(string(m.errorMessage)), true);
-        if (Array.isArray(m.content)) for (const b of m.content.map(record)) {
-          if (b.type === "toolCall") this.#tool(string(b.id), string(b.name), { args: record(b.arguments), status: "pending" });
+        const calls = Array.isArray(m.content) ? m.content.map(record).filter(b => b.type === "toolCall") : [];
+        for (const call of calls) {
+          this.#tool(string(call.id), string(call.name), { args: record(call.arguments), status: "pending" });
         }
+        // Queued requests can produce multiple completed replies before session settlement.
+        const records = this.#turn;
+        const item = records?.[records.length - 1];
+        if (item && item.id === this.#assistant && m.stopReason === "stop" && !calls.length) item.reply = true;
         this.#assistant = ""; this.#blocks.clear(); break;
       }
       case "toolResult":

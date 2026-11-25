@@ -36,13 +36,18 @@ function apply(views: Map<string, View>, ops: unknown[]) {
   }
 }
 
-const visible = (views: Views) => [...views.values()].filter(view => view.props.hidden !== true);
+const visible = (views: Views) => [...views.values()].filter(view => {
+  for (let current: View | undefined = view; current; current = views.get(current.parent)) {
+    if (current.props.hidden === true) return false;
+  }
+  return true;
+});
 const withText = (views: Views, text: string) => visible(views).filter(view => view.props.text === text);
 const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
 async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean,
-  scenario: "notice" | "composer" = "notice") {
+  scenario: "notice" | "composer" | "follow-up" = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
     const preload = join(cwd, "tty.ts");
@@ -53,6 +58,12 @@ const sessionId = "notice-test";
 const send = value => console.log(JSON.stringify({ sessionId, ...value }));
 let prompts = 0, stopCalls = 0;
 const composer = ${scenario === "composer"};
+const queued = ${scenario === "follow-up"};
+const message = (role, content) => {
+  const message = { role, content, ...(role === "assistant" ? { stopReason: "stop" } : {}) };
+  send({ type: "message_end", message });
+  if (role === "assistant") send({ type: "turn_end", message, toolResults: [] });
+};
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, type, ...fields } = JSON.parse(line);
   if (type === "open_session" && ${rejectOpen}) {
@@ -80,7 +91,16 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (type === "prompt") {
     if (!composer && ++prompts === 2) process.exit(7);
     send({ type: "agent_start" });
+    if (queued) message("user", fields.message);
     send({ type: "extension_ui_request", method: "notify", message: "Fixture turn started" });
+  }
+  if (queued && type === "follow_up" && fields.expectedTurnId === "turn-one") {
+    message("assistant", "First completed reply");
+    send({ type: "turn_start" });
+    message("user", fields.message);
+    message("assistant", "Second completed reply");
+    send({ type: "agent_end" });
+    send({ type: "agent_settled" });
   }
   if (type === "abort" && !composer) send({ type: "agent_idle" });
 }
@@ -209,4 +229,28 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
     return false;
   }, "composer");
   expect(step).toBe(4);
+});
+
+test("settlement keeps both replies to queued requests visible without an activity disclosure (#15)", async () => {
+  let step = 0;
+  let settled: Views = new Map();
+  await exercise(false, (views, event, key) => {
+    if (step === 0 && withText(views, warning).length) {
+      step++;
+      event({ ev: "send", id: "draft", text: "First request" });
+    } else if (step === 1 && withText(views, "Fixture turn started").length) {
+      step++;
+      key("Queued request\x1b[13;5u");
+    } else if (step === 2 && views.get("draft")?.props.sendable === true &&
+        withText(views, "Second completed reply").length) {
+      settled = new Map(views);
+      return true;
+    }
+    return false;
+  }, "follow-up");
+
+  expect(visible(settled).filter(view => view.kind === "text" || view.kind === "md")
+    .filter(view => settled.get(view.parent)?.kind === "message").map(view => view.props.text))
+    .toEqual(["First request", "First completed reply", "Queued request", "Second completed reply"]);
+  expect(hasDetail(settled, "Show turn activity")).toBe(false);
 });
