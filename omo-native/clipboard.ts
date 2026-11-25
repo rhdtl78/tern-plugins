@@ -16,7 +16,7 @@ export class Clipboard {
   readonly #transfers: Partial<Record<Phase, Transfer>> = {};
   get pending() { return !!this.#transfers.offer || !!this.#transfers.read; }
   constructor(private send: (packet: string) => void,
-    private accept: (mime: string, data: Buffer) => void, private error: (reason: string) => void) {}
+    private accept: (mime: string, data: Buffer) => void, private error: (reason: string, cause?: "timeout") => void) {}
 
   cancel() {
     this.#clear("offer");
@@ -32,7 +32,7 @@ export class Clipboard {
     this.#clear(phase);
     const timer = setTimeout(() => {
       this.#clear(phase);
-      this.error("Tern did not complete the paste.");
+      this.error("Tern did not complete the paste.", "timeout");
     }, 3000);
     this.#transfers[phase] = { key, chunks: [], size: 0, mime, timer };
   }

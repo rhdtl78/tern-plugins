@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { record, string, surface } from "./surface";
@@ -16,6 +16,7 @@ const warning = "Hot-reloaded: fixture/omo.jsonc";
 const refusal = "fixture refused startup";
 const exit = "RPC exited (7)";
 const clipboardDraft = "Synthetic draft to keep";
+const clipboardSuffix = " plus new text";
 
 function apply(views: Map<string, View>, ops: unknown[]) {
   function add(parent: string, value: unknown) {
@@ -46,9 +47,10 @@ async function exercise(rejectOpen: boolean, observe: (views: Views, event: (val
   scenario: "notice" | "composer" | "clipboard" = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
-    const preload = join(cwd, "tty.ts");
-    await writeFile(preload, "process.stdin.isTTY = process.stdout.isTTY = true; process.stdin.setRawMode = () => process.stdin;");
+    const promptsPath = join(cwd, "prompts.jsonl");
+    await writeFile(promptsPath, "");
     await writeFile(join(cwd, "omo"), `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const sessionId = "notice-test";
 const send = value => console.log(JSON.stringify({ sessionId, ...value }));
@@ -69,7 +71,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (++prompts !== 1 || fields.message !== "Run fixture" ||
         Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
   }
-  if (${scenario === "clipboard"} && type === "prompt" && fields.message !== ${JSON.stringify(clipboardDraft)}) process.exit(8);
+  if (${scenario === "clipboard"} && type === "prompt") appendFileSync("prompts.jsonl", JSON.stringify(fields.message) + "\\n");
   if (composer && type === "abort" && (++stopCalls !== 1 ||
       fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined)) process.exit(9);
   const data = type === "open_session" ? { sessionId, state: { model: { name: ${JSON.stringify(model)} } } }
@@ -87,21 +89,25 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (type === "abort" && !composer) send({ type: "agent_idle" });
 }
 `, { mode: 0o700 });
-    const child = Bun.spawn([process.execPath, "--preload", preload, join(import.meta.dir, "main.ts")], {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const output = writable.getWriter();
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "main.ts")], {
       cwd, env: { ...process.env, PATH: `${cwd}:${dirname(process.execPath)}:/usr/bin:/bin` },
-      stdin: "pipe", stdout: "pipe", stderr: "inherit", timeout: scenario === "clipboard" ? 4500 : 3500,
+      terminal: { data: (_terminal, bytes) => { void output.write(bytes.slice()); } },
+      onExit: () => { void output.close(); },
+      timeout: scenario === "clipboard" ? 6000 : 3500,
     });
     const views = new Map<string, View>();
-    const send = (value: string) => { child.stdin.write(value); child.stdin.flush(); };
+    const send = (value: string) => { child.terminal?.write(value); };
     const event = (value: object) => send(`\x1b_tsp;e;${JSON.stringify({ sf: surface, ...value })}\x1b\\`);
     try {
-      send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
       let buffer = "";
-      for await (const chunk of child.stdout.pipeThrough(new TextDecoderStream())) {
+      for await (const chunk of readable.pipeThrough(new TextDecoderStream())) {
         buffer += chunk;
         let end: number;
         while ((end = buffer.indexOf("\x1b\\")) !== -1) {
           const packet = buffer.slice(0, end).split("\x1b_tsp;f;")[1];
+          if (buffer.slice(0, end).includes("\x1b_tsp;q;")) send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
           buffer = buffer.slice(end + 2);
           if (!packet) continue;
           const { ops } = record(JSON.parse(packet));
@@ -110,8 +116,12 @@ for await (const line of createInterface({ input: process.stdin })) {
           if (observe(views, event, send)) send("\x04");
         }
       }
-      expect(await child.exited).toBe(0);
-    } finally { child.kill(); await child.exited; }
+      const code = await child.exited;
+      if (scenario === "clipboard") {
+        expect(await readFile(promptsPath, "utf8")).toBe(JSON.stringify(clipboardDraft + clipboardSuffix) + "\n");
+      }
+      expect(code).toBe(0);
+    } finally { child.kill(); await child.exited; child.terminal?.close(); }
   } finally { await rm(cwd, { recursive: true, force: true }); }
 }
 
@@ -213,7 +223,7 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
   expect(step).toBe(4);
 });
 
-test("Send uses the retained draft after an interrupted clipboard offer expires", async () => {
+test("the first Send includes new typing after an interrupted clipboard frame expires", async () => {
   let step = 0;
   const submit = { ev: "action", id: "send", act: "submit" };
   await exercise(false, (views, event, key) => {
@@ -227,9 +237,11 @@ test("Send uses the retained draft after an interrupted clipboard offer expires"
       event(submit);
     } else if (step === 2 && hasDetail(views, "Wait for the paste to finish")) {
       step++;
+      key("\x1b]5522;type=read:status=DATA:pw=interrupted:mime=Lg==;dGV4dA==");
     } else if (step === 3 && hasDetail(views, "Tern did not complete the paste")) {
       expect(draft?.text).toBe(clipboardDraft);
       step++;
+      key(clipboardSuffix);
       event(submit);
     } else if (step === 4 && hasDetail(views, "Fixture turn started")) {
       step++;
@@ -238,4 +250,4 @@ test("Send uses the retained draft after an interrupted clipboard offer expires"
     return false;
   }, "clipboard");
   expect(step).toBe(5);
-}, 6000);
+}, 8000);

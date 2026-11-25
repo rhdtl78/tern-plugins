@@ -51,11 +51,23 @@ export class Surface {
 
 export type Input = { kind: "event"; value: RpcRecord } |
   { kind: "clipboard"; value: string } | { kind: "key" | "paste"; value: string };
+const clipboardPrefix = "\x1b]5522;";
+
 // PTY reads do not preserve message boundaries. Never parse pasted bytes as
 // terminal replies or commands, even when the paste contains literal APCs.
 export class InputStream {
   #buffer = "";
-  #discardOsc = false;
+  #discardOsc: "clipboard" | "other" | undefined;
+
+  expireClipboardFrame() {
+    const b = this.#buffer;
+    if (this.#discardOsc === "clipboard" || (!this.#discardOsc && b.startsWith("\x1b]") &&
+        (b.startsWith(clipboardPrefix) || clipboardPrefix.startsWith(b)))) {
+      this.#buffer = "";
+      this.#discardOsc = undefined;
+    }
+  }
+
   feed(chunk: string, escapeTimeout = false): Input[] {
     this.#buffer += chunk;
     const events: Input[] = [];
@@ -67,15 +79,15 @@ export class InputStream {
         const end = /\x07|\x1b\\/.exec(b.slice(offset));
         if (!end) {
           if (b.length > 16_384 || this.#discardOsc) {
-            this.#discardOsc = true;
+            this.#discardOsc ??= b.startsWith(clipboardPrefix) ? "clipboard" : "other";
             this.#buffer = b.endsWith("\x1b") ? "\x1b" : "";
           }
           break;
         }
-        if (!this.#discardOsc && b.startsWith("\x1b]5522;"))
-          events.push({ kind: "clipboard", value: end.index <= 16_384 ? b.slice(7, offset + end.index) : "" });
+        if (!this.#discardOsc && b.startsWith(clipboardPrefix))
+          events.push({ kind: "clipboard", value: end.index <= 16_384 ? b.slice(clipboardPrefix.length, offset + end.index) : "" });
         else if (this.#discardOsc) events.push({ kind: "clipboard", value: "" });
-        this.#discardOsc = false;
+        this.#discardOsc = undefined;
         size = offset + end.index + end[0].length;
       } else if (b.startsWith("\x1b[200~")) {
         const end = b.indexOf("\x1b[201~", 6);

@@ -45,7 +45,7 @@ const attachments = new Map<string, Attachment>();
 let attachmentError = "", previews = false, pasting = false, pasteEpoch = 0;
 const clipboard = new Clipboard(packet => process.stdout.write(packet), (mime, bytes) => {
   if (canPaste() || (mime === "text/plain" && (ask?.typed || picker))) void paste(mime, bytes);
-}, reason => { if (canPaste()) { attachmentError = reason; refresh(); } });
+}, (reason, cause) => { if (cause === "timeout") input.expireClipboardFrame(); if (canPaste()) { attachmentError = reason; refresh(); } });
 const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
 const waiting = new Map<string, RpcRecord>();
 let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
