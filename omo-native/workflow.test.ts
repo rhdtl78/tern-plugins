@@ -493,7 +493,7 @@ test("Boulder worktree prefers a registered copy and falls back only when absent
     if (await proc.exited !== 0) throw new Error(diagnostic);
   };
   try {
-    await git("clone", "--quiet", "--shared", "--", join(import.meta.dir, "../.."), root);
+    await git("clone", "--quiet", "--shared", "--", join(import.meta.dir, ".."), root);
     await git("-C", root, "worktree", "add", "--detach", sibling, "HEAD");
     const rel = ".omo/plans/active.md";
     await mkdir(join(root, ".omo/plans"), { recursive: true });
