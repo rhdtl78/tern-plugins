@@ -6,6 +6,8 @@
     background-size: contain;
 }
 
-:is(.tn-face, .tn-dk-c)[data-program="agent"][data-icon="puzzle"] > svg {
+/* Deck cards (including the sidebar) draw a separate default glyph. */
+:is(.tn-face, .tn-dk-c)[data-program="agent"][data-icon="puzzle"] > svg,
+.tn-dk-c[data-program="agent"][data-icon="puzzle"] > .tn-dk-g {
     visibility: hidden;
 }
