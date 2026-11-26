@@ -6,7 +6,7 @@
 
 A personal collection of plugins for the Tern terminal, maintained by [@rhdtl78](https://github.com/rhdtl78). It's independent and isn't an official Tern catalog.
 
-[Browse plugins](#plugins) · [Quick start](#quick-start)
+[Browse plugins](#plugins) · [Quick start](#quick-start) · [Update a plugin](#update-a-plugin)
 
 ## Plugins
 
@@ -22,6 +22,17 @@ tern plugin list
 ```
 
 Replace `PLUGIN_DIR` with the chosen plugin's directory in this repository. Tern installs it from GitHub without a local checkout. Confirm the plugin appears in the list, then follow its README to get started.
+
+## Update a plugin
+
+To update an installed copy, run the same GitHub install command with `--force`:
+
+```sh
+tern plugin install github.com/rhdtl78/tern-plugins/PLUGIN_DIR --force
+tern plugin list
+```
+
+Replace `PLUGIN_DIR` with the plugin's directory. Tern replaces the installed copy with the one from the repository's default branch. If the plugin was linked from a local checkout, `--force` won't replace it. To switch to a GitHub install, unlink it first with `tern plugin unlink PLUGIN_ID`, using the ID shown by `tern plugin list`, then follow [Quick start](#quick-start).
 
 ## Resources
 

@@ -15,7 +15,22 @@ tern plugin install github.com/rhdtl78/tern-plugins/omo-native
 tern plugin list
 ```
 
-Look for `omo-native` in the list. To remove only the installed OMO Native plugin:
+Look for `omo-native` in the list.
+
+### Update OMO Native
+
+If OMO Native is already installed from GitHub, run:
+
+```sh
+tern plugin install github.com/rhdtl78/tern-plugins/omo-native --force
+tern plugin list
+```
+
+Tern replaces the installed copy and prints the Git commit it installed. If OMO Native is still linked from a local checkout, follow the unlink and install steps above instead. To use the updated code in an existing OMO Native chat, close and reopen the chat. If you sourced `shell-integration.sh`, start a fresh shell and source it again to pick up changes to the shell function itself.
+
+### Remove OMO Native
+
+To remove only the installed OMO Native plugin:
 
 ```sh
 tern plugin remove omo-native
