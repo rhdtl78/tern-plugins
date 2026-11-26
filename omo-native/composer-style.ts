@@ -73,8 +73,13 @@ export const composerCss = `
     }
     .sf-col[data-id="composer"] .sf-editor[data-id="draft"] .sf-ed-ph { color: var(--t2); }
     .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="footer"] {
+      --omo-footer-action-size: 28px;
       gap: var(--omo-composer-row-gap);
       margin: 0;
+    }
+    .sf-row[data-id="footer"] > .sf-place {
+      /* A wrapped line can contain the spacer, directory, and action. */
+      max-width: calc(100% - var(--omo-footer-action-size) - 2 * var(--omo-composer-row-gap));
     }
     .sf-row[data-id="footer"] > .sf-button[data-id="model"] {
       border: 1px solid var(--l3);
@@ -91,10 +96,11 @@ export const composerCss = `
       color: var(--raise);
       border: none;
       border-radius: 50%;
-      width: 28px;
-      height: 28px;
+      width: var(--omo-footer-action-size);
+      height: var(--omo-footer-action-size);
       padding: 0;
-      flex: 0 0 28px;
+      flex: 0 0 var(--omo-footer-action-size);
+      margin-left: auto;
       order: 1;
     }
     .sf-row[data-id="footer"] > .sf-button[data-id="stop"]:hover {
