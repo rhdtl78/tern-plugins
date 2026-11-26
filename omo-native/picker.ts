@@ -1,13 +1,23 @@
 import { basename } from "node:path";
-import type { Setting, SettingKind } from "./model-settings";
+import type { Setting } from "./model-settings";
 import { plain, string, type Input } from "./surface";
 import { resumeHeaderFields } from "./session";
 import { listedHeader, type SavedSession, type SavedTarget } from "./history";
 
 type Row = {
   readonly id: string; readonly label: string; readonly detail: string; readonly current?: boolean;
-  readonly target: Setting | SavedTarget;
+  readonly target: Setting | SavedTarget | { readonly entryId: string; readonly expectedLeafId?: string };
 };
+
+const labels = {
+  models: ["Choose model", "Use model", "No available models"],
+  tiers: ["Choose service tier", "Use tier", "No confirmed service tier choices for this model"],
+  thinking: ["Choose Thinking level", "Use level", "No supported Thinking levels for this model"],
+  sessions: ["Resume session", "Resume", "No saved sessions for this project"],
+  fork: ["Fork session", "Fork", "No user messages to fork from"],
+  tree: ["Session tree", "Select branch", "No session entries"],
+  rename: ["Rename session", "Rename", "Type a session name"],
+} as const;
 
 export function savedRows(sessions: readonly SavedSession[]): Row[] {
   return sessions.map(({ title, modifiedAt, ...target }, i) => ({
@@ -30,13 +40,14 @@ export class Picker {
   query = "";
   selected = "";
   rows: readonly Row[] = [];
-  constructor(readonly kind: SettingKind | "sessions", readonly id: string) {}
+  constructor(readonly kind: keyof typeof labels, readonly id: string) {}
 
   get visible() {
     const q = this.query.trim().toLowerCase();
     return this.rows.filter(row => !q || `${row.label} ${row.detail}`.toLowerCase().includes(q));
   }
   get choice() { return this.visible.find(row => row.id === this.selected); }
+  get usable() { return this.state === "ready" && !!(this.kind === "rename" ? this.query.trim() : this.choice); }
   load(rows: readonly Row[]) {
     this.rows = rows;
     this.state = "ready";
@@ -50,24 +61,18 @@ export class Picker {
   }
   // Send the catalog on load, not on every keystroke. Tern filters by `order`.
   props(catalog = false) {
-    const copy = {
-      models: ["Choose model", "Use model", "No available models"],
-      tiers: ["Choose service tier", "Use tier", "No confirmed service tier choices for this model"],
-      thinking: ["Choose Thinking level", "Use level", "No supported Thinking levels for this model"],
-      sessions: ["Resume session", "Resume", "No saved sessions for this project"],
-    }[this.kind];
+    const [title, use, empty] = labels[this.kind];
     return {
-      role: `omo.${this.kind}`, title: copy[0], size: "md", preview: "none",
+      role: `omo.${this.kind}`, title, size: "md", preview: "none",
       noun: this.kind, query: this.query, selected: this.selected, state: this.state, message: this.message,
-      empty: copy[2],
+      empty,
       ...(catalog ? { items: this.rows.map(({ id, label, detail }) => ({ id, label, detail })),
         current: this.rows.filter(row => row.current).map(row => row.id) } : {}),
       order: this.visible.map(row => row.id), total: this.rows.length,
       actions: [
         { id: "close", label: "Cancel", keys: ["esc"], disabled: this.applying },
         ...(this.state === "error" ? [{ id: "retry", label: "Reload" }] : []),
-        { id: "use", label: copy[1], keys: ["enter"], primary: true,
-          disabled: this.state !== "ready" || !this.selected },
+        { id: "use", label: use, keys: ["enter"], primary: true, disabled: !this.usable },
       ],
     };
   }
@@ -80,7 +85,7 @@ export class Picker {
         if (e.act === "close") return "close";
         if (e.act === "retry" && this.state === "error") return "retry";
         if (e.act === "clear") return this.filter("");
-        if (e.act === "use" && this.state === "ready" && this.choice) return "use";
+        if (e.act === "use" && this.usable) return "use";
       }
       if ((e.ev === "select" || e.ev === "activate") && this.state === "ready" &&
           this.visible.some(row => row.id === e.item)) {
@@ -92,7 +97,7 @@ export class Picker {
     if (i.kind === "paste") return this.filter(this.query + plain(i.value).replace(/\s+/g, " "));
     switch (i.value) {
       case "\x1b": case "\x1b[27u": case "\x03": return "close";
-      case "\r": case "\x1b[13u": return this.state === "ready" && this.choice ? "use" : undefined;
+      case "\r": case "\x1b[13u": return this.usable ? "use" : undefined;
       case "\x1b[A": case "\x1b[B": {
         const rows = this.visible, index = rows.findIndex(row => row.id === this.selected);
         this.selected = rows[Math.max(0, Math.min(rows.length - 1, index + (i.value.endsWith("A") ? -1 : 1)))]?.id ?? "";

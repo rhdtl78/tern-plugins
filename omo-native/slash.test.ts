@@ -1,9 +1,32 @@
 import { expect, test } from "bun:test";
 import { SlashMenu } from "./slash";
+import { sessionCommand } from "./session-commands";
 import { RpcCommandError, RpcTransportError } from "./rpc";
 import type { Op } from "./surface";
 
 const command = (name: string, source = "extension", syntax = "slash") => ({ name, source, syntax });
+
+test.each([
+  "/new\nPlease keep this paragraph",
+  "/clone\r\nDraft to preserve",
+  "/resume this paragraph",
+  "/session\n",
+  "/rename\nDraft to preserve",
+  "/name First\u2028Second",
+])("session command parsing leaves %j for normal submission", (draft) => {
+  expect(sessionCommand(draft)).toBeUndefined();
+});
+
+test.each([
+  [" /NEW \t", "new", ""],
+  ["/resume ", "resume", ""],
+  ["/rename", "rename", ""],
+  ["/rename  Fixture name ", "rename", "Fixture name"],
+  ["/NAME\tOther name", "name", "Other name"],
+])("session command parsing recognizes %j as local intent", (draft, name, argument) => {
+  expect(sessionCommand(draft)).toEqual({ name, argument });
+});
+
 function setup() {
   const frames: Op[] = [];
   const menu = new SlashMenu((...ops) => frames.push(...ops));
@@ -31,7 +54,7 @@ test("a replaced client, a dismissed query and an obsolete button cannot select"
   menu.edit("/fr", 3); expect(menu.pick(oldId)).toBeUndefined();
   menu.close(); deferred.resolve({data:{commands:[command("stale")]}}); await loaded;
   expect(menu.choice).toBeUndefined(); expect(frames.at(-1)).toEqual(["del", "slash-menu"]);
-  menu.edit("/", 1); expect(menu.choice).toBe("fresh");
+  menu.edit("/fre", 4); expect(menu.choice).toBe("fresh");
 });
 
 test("only session slash invocations in command position are offered", async () => {
@@ -41,8 +64,8 @@ test("only session slash invocations in command position are offered", async () 
     menu.edit(input, input.length); expect(menu.choice).toBeUndefined();
   }
   menu.edit("/x", 1); expect(menu.choice).toBeUndefined();
-  menu.edit("/", 1); expect(menu.buttons.map(row=>row.name)).toEqual(["template","x"]);
-  menu.move(1); expect(menu.pick()).toBe("/x "); expect(menu.choice).toBeUndefined();
+  menu.edit("/temp", 5); expect(menu.choice).toBe("template");
+  menu.edit("/x", 2); expect(menu.pick()).toBe("/x "); expect(menu.choice).toBeUndefined();
 });
 
 test("exact slash defaults without overriding explicit arrow or click selection", async () => {
@@ -61,9 +84,29 @@ test("exact slash defaults without overriding explicit arrow or click selection"
 });
 
 for (const error of [new RpcCommandError("get_commands", { error: "unknown command" }), new RpcTransportError("disconnected")]) test(`optional catalog ${error.name} does not capture editing`, async () => {
-  const { menu, deferred, loaded } = setup(); menu.edit("/",1);
+  const { menu, deferred, loaded } = setup(); menu.edit("/external",9);
   deferred.reject(error); await loaded;
   expect(menu.choice).toBeUndefined(); expect(menu.pick()).toBeUndefined();
+  menu.edit("/res", 4); expect(menu.pick()).toBe("/resume ");
+});
+
+test("session actions remain searchable and authoritative across RPC catalog changes", async () => {
+  const { menu, owner, deferred, loaded } = setup();
+  const names = ["clone", "fork", "name", "new", "rename", "resume", "session", "sessions", "tree"];
+  deferred.resolve({ data: { commands: [command("resume"), command("RESUME"), command("help")] } });
+  await loaded;
+  menu.edit("/", 1);
+  const seen = new Set<string>();
+  for (let i = 0; i < names.length + 1; i++) {
+    if (menu.choice) seen.add(menu.choice);
+    menu.move(1);
+  }
+  expect([...seen]).toEqual(["clone", "fork", "help", "name", "new", "rename", "resume", "session", "sessions", "tree"]);
+  menu.changed(owner.sessionId, []);
+  for (const name of names) {
+    menu.edit(`/${name}`, name.length + 1);
+    expect(menu.pick()).toBe(`/${name} `);
+  }
 });
 
 test("unexpected request failures reach the slash discovery caller", async () => {

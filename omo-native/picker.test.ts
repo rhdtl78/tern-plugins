@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Picker, savedRows, selectedSession } from "./picker";
 import { appliedSettings, changeSetting, modelChoices, settingApplied, thinkingChoices } from "./model-settings";
+import { entryRows, sessionCommand } from "./session-commands";
 import type { RpcRecord } from "./rpc";
 import { record } from "./surface";
 
@@ -157,6 +158,41 @@ test("keyboard and pointer can only activate a visible row of this picker", () =
   p.input({ kind: "event", value: { id: "new", ev: "action", act: "clear" } });
   expect(p.selected).toBe(a);
   expect(key("\x1b")).toBe("close");
+});
+
+test("native rename and branch choices provide only their intended arguments", () => {
+  expect(sessionCommand("/NAME  Project review ")).toEqual({ name: "name", argument: "Project review" });
+  expect(sessionCommand("show /resume")).toBeUndefined();
+  expect(sessionCommand("/sessions-list")).toBeUndefined();
+  const rename = new Picker("rename", "sheet");
+  rename.load([]);
+  expect(rename.usable).toBe(false);
+  rename.input({ kind: "paste", value: "Project review" });
+  expect(rename.input({ kind: "event", value: { ev: "action", id: "sheet", act: "use" } })).toBe("use");
+  expect(rename.choice).toBeUndefined();
+
+  const entry = (id: string, role: string, content: string) =>
+    ({ id, type: "message", message: { role, content } });
+  const tree = new Picker("tree", "branches");
+  tree.load(entryRows("tree", { leafId: "leaf", tree: [{
+    entry: entry("base", "user", "Original prompt"),
+    children: [{ entry: entry("leaf", "assistant", "Chosen reply"), children: [] }],
+  }] }));
+  expect(tree.choice?.target).toEqual({ entryId: "leaf", expectedLeafId: "leaf" });
+  tree.input({ kind: "paste", value: "original" });
+  expect(tree.choice?.target).toEqual({ entryId: "base", expectedLeafId: "leaf" });
+  expect(entryRows("fork", { messages: [{ entryId: "base", text: "Fork prompt" }] })[0]?.target)
+    .toEqual({ entryId: "base" });
+});
+
+test("tree choice sends no leaf fence at the session root", () => {
+  const tree = new Picker("tree", "branches");
+  tree.load(entryRows("tree", { leafId: null, tree: [{
+    entry: { id: "base", type: "message", message: { role: "user", content: "Original prompt" } },
+    children: [],
+  }] }));
+  expect(tree.input({ kind: "event", value: { id: "branches", ev: "activate", item: "e0" } })).toBe("use");
+  expect(tree.choice?.target).toStrictEqual({ entryId: "base" });
 });
 
 test("resume rejects deleted, replaced, redirected and foreign-cwd saved rows", async () => {
