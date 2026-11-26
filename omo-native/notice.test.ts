@@ -142,6 +142,7 @@ test("shows progress outside the composer and keeps engine exit in main", async 
     expect(views.get("model")?.props.hidden).not.toBe(true);
     expect(views.get("model")?.props.text).toBe(phase === opening ? "OMO" : model);
     expect(views.get("stop")?.props.hidden).toBe(phase === opening);
+    expect(withText(views, "ULW 실행 중")).toEqual([]);
   }
   const ready = phases.get("ready") ?? new Map();
   expect(withText(ready, warning).map(view => `${view.parent}/${view.kind}`)).toEqual(["layer/toast"]);
@@ -151,6 +152,31 @@ test("shows progress outside the composer and keeps engine exit in main", async 
   expect(stopped.get("draft")?.props.sendable).toBe(true);
   expect(visible(stopped).filter(view => view.parent === "footer" && view.kind === "badge")).toEqual([]);
   expectFailure(phases.get("after focus") ?? new Map(), exit);
+});
+
+test("shows the localized ULW badge only after runtime confirmation and until Stop settles", async () => {
+  let step = 0;
+  await exercise(false, (views, { event, key }) => {
+    const badges = withText(views, "ULW 실행 중");
+    if (step === 0 && withText(views, warning).length) {
+      step++;
+      key("ULW fixture");
+    } else if (step === 1 && views.get("composer-mode")?.props.role === "ulw-preview") {
+      expect(badges).toEqual([]);
+      step++;
+      key("\r");
+    } else if (step === 2 && withText(views, "Fixture turn started").length) {
+      expect(badges.map(view => [view.parent, view.kind])).toEqual([["session-feedback", "badge"]]);
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 3 && withText(views, "Stopped").length) {
+      expect(badges).toEqual([]);
+      step++;
+      return true;
+    }
+    return false;
+  }, "ulw");
+  expect(step).toBe(4);
 });
 
 test("keeps a refused RPC startup in a durable error card in main", async () => {

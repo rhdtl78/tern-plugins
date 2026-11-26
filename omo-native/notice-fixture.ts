@@ -2,7 +2,7 @@ export const model = "Fixture model";
 export const warning = "Hot-reloaded: fixture/omo.jsonc";
 export const refusal = "fixture refused startup";
 
-export type Scenario = "notice" | "composer" | "queue" | "clipboard";
+export type Scenario = "notice" | "composer" | "queue" | "clipboard" | "ulw";
 export const promptsFile = "prompts.jsonl";
 export const checkpoint = {
   acknowledged: "acknowledged",
@@ -85,6 +85,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     notifyType: "warning", message: ${JSON.stringify(warning)} });
   if (type === "prompt") {
     if (!composer && ++prompts === 2) process.exit(7);
+    if (${scenario === "ulw"}) send({ type: "message_start",
+      message: { role: "custom", customType: "omo-ultrawork:directive", display: false } });
     send({ type: "agent_start" });
     send({ type: "extension_ui_request", method: "notify", message: "Fixture turn started" });
   }

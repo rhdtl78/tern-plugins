@@ -1,35 +1,13 @@
 import { basename } from "node:path";
-import type { OmoRpc, RpcRecord } from "./rpc";
-import { plain, record, string, type Input } from "./surface";
+import type { Setting, SettingKind } from "./model-settings";
+import { plain, string, type Input } from "./surface";
 import { resumeHeaderFields } from "./session";
 import { listedHeader, type SavedSession, type SavedTarget } from "./history";
 
-type Model = { readonly provider: string; readonly modelId: string };
 type Row = {
   readonly id: string; readonly label: string; readonly detail: string; readonly current?: boolean;
-  readonly target: Model | SavedTarget;
+  readonly target: Setting | SavedTarget;
 };
-
-export async function availableModels(rpc: Pick<OmoRpc, "request" | "getProtocolInfo">, current: RpcRecord): Promise<Row[]> {
-  const { capabilities } = record((await rpc.getProtocolInfo()).data);
-  if (!Array.isArray(capabilities) || !capabilities.includes("session_model_scope"))
-    throw new Error("This OmO engine cannot switch models for only this session. Update OmO to use this picker.");
-  const { models } = record((await rpc.request("get_available_models")).data);
-  if (!Array.isArray(models)) throw new Error("Invalid model catalog from OmO");
-  return models.map((value, i) => {
-    const model = record(value), provider = string(model.provider), modelId = string(model.id);
-    if (!provider || !modelId) throw new Error("Model catalog entry is missing its provider or ID");
-    return { id: `m${i}`, label: plain(string(model.name) || modelId), detail: plain(`${provider}/${modelId}`),
-      current: provider === current.provider && modelId === current.id, target: { provider, modelId } };
-  });
-}
-
-export async function applyModel(rpc: Pick<OmoRpc, "request">, target: Model) {
-  const model = record((await rpc.request("set_model", { ...target, scope: "session" })).data);
-  if (model.provider !== target.provider || model.id !== target.modelId)
-    throw new Error("OmO did not confirm the selected model");
-  return model;
-}
 
 export function savedRows(sessions: readonly SavedSession[]): Row[] {
   return sessions.map(({ title, modifiedAt, ...target }, i) => ({
@@ -52,7 +30,7 @@ export class Picker {
   query = "";
   selected = "";
   rows: readonly Row[] = [];
-  constructor(readonly kind: "models" | "sessions", readonly id: string) {}
+  constructor(readonly kind: SettingKind | "sessions", readonly id: string) {}
 
   get visible() {
     const q = this.query.trim().toLowerCase();
@@ -72,18 +50,23 @@ export class Picker {
   }
   // Send the catalog on load, not on every keystroke. Tern filters by `order`.
   props(catalog = false) {
-    const models = this.kind === "models";
+    const copy = {
+      models: ["Choose model", "Use model", "No available models"],
+      tiers: ["Choose service tier", "Use tier", "No confirmed service tier choices for this model"],
+      thinking: ["Choose Thinking level", "Use level", "No supported Thinking levels for this model"],
+      sessions: ["Resume session", "Resume", "No saved sessions for this project"],
+    }[this.kind];
     return {
-      role: `omo.${this.kind}`, title: models ? "Choose model" : "Resume session", size: "md", preview: "none",
+      role: `omo.${this.kind}`, title: copy[0], size: "md", preview: "none",
       noun: this.kind, query: this.query, selected: this.selected, state: this.state, message: this.message,
-      empty: models ? "No available models" : "No saved sessions for this project",
+      empty: copy[2],
       ...(catalog ? { items: this.rows.map(({ id, label, detail }) => ({ id, label, detail })),
         current: this.rows.filter(row => row.current).map(row => row.id) } : {}),
       order: this.visible.map(row => row.id), total: this.rows.length,
       actions: [
         { id: "close", label: "Cancel", keys: ["esc"], disabled: this.applying },
         ...(this.state === "error" ? [{ id: "retry", label: "Reload" }] : []),
-        { id: "use", label: models ? "Use model" : "Resume", keys: ["enter"], primary: true,
+        { id: "use", label: copy[1], keys: ["enter"], primary: true,
           disabled: this.state !== "ready" || !this.selected },
       ],
     };
