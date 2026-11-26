@@ -21,12 +21,13 @@ function omo {
     if [ "${TERM_PROGRAM-}" = tern ] && [[ -n ${TERN_PANE-} &&
           -z ${SSH_CONNECTION-}${SSH_TTY-}${TMUX-}${STY-}${ZELLIJ-} &&
           -t 0 && -t 1 && -t 2 && -r $_omo_native_dir/main.ts ]]; then
-        local runner rc=0
+        local runner cli
         runner=$(command -v bun) || runner=$HOME/.bun/bin/bun
-        if [[ -x $runner ]]; then
-            "$runner" run "$_omo_native_dir/main.ts" --from-shell "$@" || rc=$?
-            # Reserved exclusively for a declined probe, before any surface or RPC.
-            if [[ $rc != 75 ]]; then return "$rc"; fi
+        if [[ -n ${BASH_VERSION-} ]]; then cli=$(type -P omo) || cli=; else cli=$(whence -p omo) || cli=; fi
+        if [ "${cli##*/}" = omo ] && [[ -x $runner && -f $cli && -x $cli ]]; then
+            # Resolve before Bun starts. A child status (even 75) is never a routing decision.
+            OMO_NATIVE_CLI=$cli "$runner" "$_omo_native_dir/main.ts" --from-shell "$@"
+            return $?
         fi
     fi
     command omo "$@"

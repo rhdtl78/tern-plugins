@@ -9,6 +9,7 @@ for (const [name, args, reply, expectedCalls, status] of [
   ["DA1 before a late hello declines exactly once", "--resume", "late", "--resume\n", 23],
   ["an unanswered probe preserves the short resume argument", "-r", "none", "-r\n", 23],
   ["a negotiated short resume cancels without running either CLI or RPC", "-r", "hello", "", 0],
+  ["Ctrl+C cancels an unanswered probe without starting the CLI", "-r", "cancel", "", 0],
   ["RPC bypasses the probe", "--mode rpc", "bypass", "--mode rpc\n", 23],
   ["uppercase short flag bypasses even with nocasematch", "-R", "bypass", "-R\n", 23],
   ["uppercase long flag bypasses even with nocasematch", "--RESUME", "bypass", "--RESUME\n", 23],
@@ -17,10 +18,10 @@ for (const [name, args, reply, expectedCalls, status] of [
     const cwd = await mkdtemp(join(tmpdir(), "omo-shell-"));
     try {
       await writeFile(join(cwd, "calls"), "");
-      await writeFile(join(cwd, "omo"), '#!/bin/sh\nprintf "%s\\n" "$*" >> calls\nexit 23\n', { mode: 0o700 });
+      await writeFile(join(cwd, "omo"), '#!/bin/sh\n[ "$(tty)" = "$ORIGINAL_TTY" ] || exit 97\nprintf "%s\\n" "$*" >> calls\nexit 23\n', { mode: 0o700 });
       let bytes = "", answered = false, closed = false;
       const child = Bun.spawn(["bash", "--noprofile", "--norc", "-ic",
-        `shopt -s nocasematch; source "$1"; omo ${args}; rc=$?; shopt -q nocasematch && exit "$rc"; exit 99`,
+        `shopt -s nocasematch; export ORIGINAL_TTY=$(tty); source "$1"; omo ${args}; rc=$?; shopt -q nocasematch && exit "$rc"; exit 99`,
         "bash", join(import.meta.dir, "shell-integration.sh")], {
         cwd, timeout: 3500, env: { HOME: cwd, PATH: `${cwd}:${dirname(process.execPath)}:/usr/bin:/bin`,
           TERM_PROGRAM: "tern", TERN_PANE: "1" },
@@ -31,6 +32,7 @@ for (const [name, args, reply, expectedCalls, status] of [
             const hello = '\x1b_tsp;r;{"r":"hello","v":1,"credits":10}\x1b\\';
             if (reply === "late") pty.write("\x1b[?1;2c" + hello);
             if (reply === "hello") pty.write(hello);
+            if (reply === "cancel") pty.write("\x03");
           }
           if (!closed && bytes.includes("omo.sessions")) { closed = true; pty.write("\x04"); }
         } },
