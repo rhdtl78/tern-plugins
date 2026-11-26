@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { checkpoint, model, noticeEngine, refusal, warning, type Checkpoint, type Scenario } from "./notice-fixture";
 import { record, string, surface } from "./surface";
 
 type View = {
@@ -11,9 +13,6 @@ type View = {
 };
 type Views = ReadonlyMap<string, View>;
 const opening = "Opening session…", working = "Working…", stopping = "Stopping…";
-const model = "Fixture model";
-const warning = "Hot-reloaded: fixture/omo.jsonc";
-const refusal = "fixture refused startup";
 const exit = "RPC exited (7)";
 
 function apply(views: Map<string, View>, ops: unknown[]) {
@@ -41,50 +40,19 @@ const withText = (views: Views, text: string) => visible(views).filter(view => v
 const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
-async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean,
-  scenario: "notice" | "composer" = "notice") {
+type FixtureControls = {
+  readonly event: (value: object) => void;
+  readonly key: (bytes: string) => void;
+  readonly release: (marker: Checkpoint) => void;
+};
+
+async function exercise(rejectOpen: boolean, observe: (views: Views, controls: FixtureControls) => boolean,
+  scenario: Scenario = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
     const preload = join(cwd, "tty.ts");
     await writeFile(preload, "process.stdin.isTTY = process.stdout.isTTY = true; process.stdin.setRawMode = () => process.stdin;");
-    await writeFile(join(cwd, "omo"), `#!/usr/bin/env bun
-import { createInterface } from "node:readline";
-const sessionId = "notice-test";
-const send = value => console.log(JSON.stringify({ sessionId, ...value }));
-let prompts = 0, stopCalls = 0;
-const composer = ${scenario === "composer"};
-for await (const line of createInterface({ input: process.stdin })) {
-  const { id, type, ...fields } = JSON.parse(line);
-  if (type === "open_session" && ${rejectOpen}) {
-    send({ id, type: "response", command: type, success: false, error: ${JSON.stringify(refusal)} });
-    continue;
-  }
-  if (composer && type === "steer") {
-    const correct = fields.message === "previous" && fields.expectedTurnId === "turn-one";
-    send({ id, type: "response", command: type, success: false, error: correct ? "fixture turn changed" : "wrong steer request" });
-    continue;
-  }
-  if (composer && type === "prompt") {
-    if (++prompts !== 1 || fields.message !== "Run fixture" ||
-        Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
-  }
-  if (composer && type === "abort" && (++stopCalls !== 1 ||
-      fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined)) process.exit(9);
-  const data = type === "open_session" ? { sessionId, state: { model: { name: ${JSON.stringify(model)} } } }
-    : type === "get_messages" ? { messages: [] }
-    : type === "get_state" ? { isStreaming: true, currentTurnId: "turn-one" }
-    : type === "abort" ? { idle: !composer } : {};
-  send({ id, type: "response", command: type, success: true, data });
-  if (type === "get_messages") send({ type: "extension_ui_request", method: "notify",
-    notifyType: "warning", message: ${JSON.stringify(warning)} });
-  if (type === "prompt") {
-    if (!composer && ++prompts === 2) process.exit(7);
-    send({ type: "agent_start" });
-    send({ type: "extension_ui_request", method: "notify", message: "Fixture turn started" });
-  }
-  if (type === "abort" && !composer) send({ type: "agent_idle" });
-}
-`, { mode: 0o700 });
+    await writeFile(join(cwd, "omo"), noticeEngine(rejectOpen, scenario), { mode: 0o700 });
     const child = Bun.spawn([process.execPath, "--preload", preload, join(import.meta.dir, "main.ts")], {
       cwd, env: { ...process.env, PATH: `${cwd}:${dirname(process.execPath)}:/usr/bin:/bin` },
       stdin: "pipe", stdout: "pipe", stderr: "inherit", timeout: 3500,
@@ -92,6 +60,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     const views = new Map<string, View>();
     const send = (value: string) => { child.stdin.write(value); child.stdin.flush(); };
     const event = (value: object) => send(`\x1b_tsp;e;${JSON.stringify({ sf: surface, ...value })}\x1b\\`);
+    const release = (marker: Checkpoint) => writeFileSync(join(cwd, marker), "", { flag: "wx" });
+    const controls = { event, key: send, release };
     try {
       send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
       let buffer = "";
@@ -105,7 +75,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           const { ops } = record(JSON.parse(packet));
           if (!Array.isArray(ops)) continue;
           apply(views, ops);
-          if (observe(views, event, send)) send("\x04");
+          if (observe(views, controls)) send("\x04");
         }
       }
       expect(await child.exited).toBe(0);
@@ -130,7 +100,7 @@ test("shows progress outside the composer and keeps engine exit in main", async 
   const phases = new Map<string, Views>();
   const save = (name: string, views: Views) => phases.set(name, new Map(views));
   const submit = { ev: "send", id: "draft", text: "Run fixture" };
-  await exercise(false, (views, event) => {
+  await exercise(false, (views, { event }) => {
     if (!phases.has(opening) && withText(views, opening).length) save(opening, views);
     if (!phases.has("ready") && withText(views, warning).length) {
       save("ready", views);
@@ -184,7 +154,7 @@ test("keeps a refused RPC startup in a durable error card in main", async () => 
 
 test("rejected steer restores both drafts and repeated Escape cannot stop twice before settlement", async () => {
   let step = 0;
-  await exercise(false, (views, event, key) => {
+  await exercise(false, (views, { event, key }) => {
     const draft = views.get("draft")?.props;
     if (step === 0 && withText(views, warning).length) {
       step++;
@@ -209,4 +179,80 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
     return false;
   }, "composer");
   expect(step).toBe(4);
+});
+
+test("projects the engine's steering and follow-up queue above the composer", async () => {
+  let step = 0, sawAckWithoutRows = false;
+  await exercise(false, (views, { event, key, release }) => {
+    const pending = views.get("pending-messages");
+    const rows = [...views].filter(([, view]) => view.parent === "pending-messages")
+      .map(([id, view]) => [id, view.props.text]);
+    const messages = withText(views, "same").filter(view => view.parent !== "pending-messages");
+    const draft = views.get("draft")?.props;
+    const ids = rows.map(([id]) => id);
+    if (step === 0 && withText(views, warning).length) {
+      expect(pending?.props.hidden).toBe(true);
+      expect([...views.keys()].indexOf("pending-messages")).toBeLessThan([...views.keys()].indexOf("composer"));
+      expect(pending?.parent).toBe("dock");
+      step++;
+      event({ ev: "send", id: "draft", text: "Run fixture" });
+    } else if (step === 1 && withText(views, "Fixture turn started").length) {
+      step++;
+      key("first\x1b[13;5u");
+    } else if (step === 2 && !sawAckWithoutRows && withText(views, "Fixture acknowledged").length) {
+      expect(rows).toEqual([]);
+      expect(pending?.props.hidden).toBe(true);
+      expect(draft?.text).toBe("");
+      sawAckWithoutRows = true;
+      release(checkpoint.acknowledged);
+    } else if (step === 2 && ids.length === 1) {
+      expect(rows).toEqual([["pending.q_1", "Queue: first"]]);
+      expect(pending?.props.hidden).toBe(false);
+      step++;
+      key("same\x1b[13;9u");
+    } else if (step === 3 && ids.length === 2) {
+      expect(rows).toEqual([["pending.q_1", "Queue: first"], ["pending.q_2", "Steering: same"]]);
+      step++;
+      key("same\x1b[13;5u");
+    } else if (step === 4 && ids.length === 3) {
+      expect(rows[2]).toEqual(["pending.q_3", "Queue: same"]);
+      expect(messages).toHaveLength(0);
+      step++;
+      key("refused\x1b[13;9u" + "new draft");
+    } else if (step === 5 && hasDetail(views, "fixture queue refused")) {
+      expect(draft?.text).toBe("refused\nnew draft");
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 6 && draft?.sendable) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      expect(draft.text).toBe("refused\nnew draft");
+      step++;
+      release(checkpoint.stopped);
+    } else if (step === 7 && draft?.sendable === false && views.get("stop")?.props.hidden === false) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      expect(messages).toHaveLength(0);
+      step++;
+      release(checkpoint.restarted);
+    } else if (step === 8 && messages.length) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_3"]);
+      expect(messages).toHaveLength(1);
+      expect(draft?.text).toBe("refused\nnew draft");
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 9 && ids.length === 1) {
+      expect(ids).toEqual(["pending.q_3"]);
+      step++;
+      release(checkpoint.retained);
+    } else if (step === 10 && pending?.props.hidden) {
+      expect(rows).toEqual([]);
+      expect(messages).toHaveLength(1);
+      expect(draft?.text).toBe("refused\nnew draft");
+      step++;
+      return true;
+    }
+    return false;
+  }, "queue");
+  expect(sawAckWithoutRows).toBe(true);
+  expect(step).toBe(11);
 });
