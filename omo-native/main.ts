@@ -15,9 +15,10 @@ import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
 import { ComposerMode } from "./composer-mode";
+import { composerCss } from "./composer-style";
 import { PaneTerminal } from "./pane-terminal";
 import { Clipboard, clipboardTimeoutNotice } from "./clipboard";
-import { attachmentCard, attachmentCount, attachmentsCss, clipboardFile, clipboardImage, fileEntries, sendBlock, type Attachment } from "./attachments";
+import { attachmentCard, attachmentCount, clipboardFile, clipboardImage, fileEntries, sendBlock, type Attachment } from "./attachments";
 
 const screen = new Surface(), draft = new Editor();
 const input = new InputStream(() => { if (!clipboard.pending) clipboardError(clipboardTimeoutNotice); });
@@ -117,6 +118,7 @@ function refresh() {
     ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
     ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
+    ["set", "session-ulw", { hidden: border !== "ulw-running" }],
     ["set", "session-background-counts", { text: running, hidden: !running }]);
   if (welcome && transcript.populated) { welcome = false; frame(["del", "welcome"]); }
 }
@@ -268,107 +270,7 @@ async function start(hello: RpcRecord) {
     process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
   }
   transcript = new Transcript(frame, phases => workflow.todo(phases), authorIcon);
-  screen.send("s", { sf: surface, name: "omo-composer", css: `
-    .sf-col[data-id="composer"][data-role="omp.editor"] {
-      --omo-composer-edge: 1px;
-      --omo-mode-teal: light-dark(#007d71, #31c4ae);
-      --omo-mode-violet: light-dark(#7751a6, #b597e0);
-      --omo-mode-research: light-dark(#356ca6, #83ace0);
-      background: var(--raise);
-      border: var(--omo-composer-edge) solid var(--l3);
-      border-radius: 22px;
-      box-shadow: none;
-      gap: 4px;
-      padding: 8px 10px;
-    }
-    .sf-col[data-id="composer"][data-role="omp.editor"]::before,
-    .sf-col[data-id="composer"][data-role="omp.editor"]::after { display: none; }
-    .sf-col[data-id="composer"][data-role="omp.editor"]:focus-within {
-      border-color: var(--accent);
-    }
-    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-preview"]),
-    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-running"]) {
-      --omo-mode-start: var(--omo-mode-teal);
-      --omo-mode-end: var(--omo-mode-violet);
-    }
-    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="research-preview"]) {
-      --omo-mode-start: var(--omo-mode-research);
-      --omo-mode-end: var(--omo-mode-research);
-    }
-    .sf-col[data-id="composer"]:has([data-id="composer-mode"]:not([data-role="normal"])) {
-      border-color: transparent;
-      background: linear-gradient(var(--raise), var(--raise)) padding-box,
-        linear-gradient(to right, var(--omo-mode-start), var(--omo-mode-end)) border-box;
-    }
-    .sf-col[data-id="composer"]:has([data-id="composer-mode"][data-role="ulw-running"]) {
-      box-shadow: inset 0 0 0 var(--omo-composer-edge) var(--omo-mode-teal);
-    }
-    .sf-col[data-id="composer"] > .sf-row[data-id="session-feedback"] {
-      position: absolute;
-      bottom: 100%;
-      left: 22px;
-      pointer-events: none;
-    }
-    .sf-col[data-id="dock"]:has([data-id^="pending."]) .sf-row[data-id="session-feedback"] {
-      position: static;
-    }
-    .sf-scroll[data-id="pending-messages"] {
-      align-self: center;
-      width: min(100%, 736px);
-      border: 1px solid var(--l3);
-      border-radius: 12px;
-      padding: 4px 10px;
-    }
-    .sf-text[data-id^="pending."] {
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-    .sf-text[data-id="session-background-counts"] {
-      color: var(--t2);
-      font-size: .875em;
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-    }
-    .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="line"] {
-      min-height: 0;
-      padding: 0 4px;
-    }
-    .sf-col[data-id="composer"][data-role="omp.editor"] > .sf-row[data-id="line"] > .sf-editor[data-id="draft"] {
-      min-height: 0;
-    }
-    .sf-col[data-id="composer"] .sf-editor[data-id="draft"] .sf-ed-ph { color: var(--t2); }
-    .sf-col[data-id="composer"] > .sf-row[data-id="footer"] { gap: 4px; }
-    .sf-row[data-id="footer"] > .sf-button[data-id="model"] {
-      border: 1px solid var(--l3);
-      border-radius: 999px;
-      min-width: 0;
-    }
-    .sf-row[data-id="footer"] > .sf-button[data-id="model"] .sf-btn-label {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .sf-row[data-id="footer"] > .sf-button:is([data-id="send"], [data-id="stop"]) {
-      background: var(--t1);
-      color: var(--raise);
-      border: none;
-      border-radius: 50%;
-      width: 28px;
-      height: 28px;
-      padding: 0;
-      flex: 0 0 28px;
-      order: 1;
-    }
-    .sf-row[data-id="footer"] > .sf-button[data-id="stop"]:hover {
-      background: var(--t2);
-    }
-    .sf-row[data-id="footer"] > .sf-button[data-id="send"] {
-      background: var(--accent-fill);
-      color: #fff;
-    }
-    .sf-row[data-id="footer"] > .sf-button[data-id="send"]:hover { opacity: .9; }
-    ${attachmentsCss}
-  ` });
+  screen.send("s", { sf: surface, name: "omo-composer", css: composerCss });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [
     node("welcome", "card", { role: "omp.welcome" }, [
@@ -383,6 +285,7 @@ async function start(hello: RpcRecord) {
       node("session-feedback", "row", { align: "center", gap: "sm" }, [
         node("session-activity", "spinner", { style: "orbit", title: "Session work in progress", hidden: true }),
         node("session-status", "badge", { text: status, tone: "muted", hidden: !status }),
+        node("session-ulw", "badge", { text: "ULW 실행 중", tone: "muted", hidden: true }),
         node("session-background-counts", "text", { hidden: true }),
       ]),
       node("attachments", "col", { hidden: true }),
