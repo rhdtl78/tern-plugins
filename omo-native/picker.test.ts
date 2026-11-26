@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyModel, availableModels, Picker, savedRows, selectedSession } from "./picker";
+import { Picker, savedRows, selectedSession } from "./picker";
+import { appliedSettings, changeSetting, modelChoices, settingApplied, thinkingChoices } from "./model-settings";
 import type { RpcRecord } from "./rpc";
 import { record } from "./surface";
 
@@ -72,14 +73,15 @@ test("duplicate display names switch by the selected registry pair, never the de
     },
   };
   const p = new Picker("models", "sheet");
-  p.load(await availableModels(rpc, first));
+  p.load(await modelChoices(rpc, { model: first }, "models"));
   expect(p.props(true).current).toEqual([p.selected]);
   p.input({ kind: "paste", value: "TWO/BETA" });
   expect(p.props().order).toHaveLength(1);
   expect(p.input({ kind: "key", value: "\r" })).toBe("use");
   const target = p.choice?.target;
   if (!target || !("provider" in target)) throw new Error("No selected model");
-  expect(await applyModel(rpc, target)).toEqual(second);
+  await changeSetting(rpc, target);
+  expect(settingApplied({ model: second }, target)).toBe(true);
   expect(calls).toEqual([["get_available_models", undefined],
     ["set_model", { provider: "two", modelId: "beta:latest", scope: "session" }]]);
 });
@@ -90,8 +92,49 @@ test("an old engine cannot offer a model switch that would change the default", 
     getProtocolInfo: async () => ({ data: { capabilities: ["models"] } }),
     request: async (cmd: string) => { calls.push(cmd); return {}; },
   };
-  await expect(availableModels(rpc, {})).rejects.toThrow("only this session");
+  await expect(modelChoices(rpc, {}, "models")).rejects.toThrow("only this session");
   expect(calls).toEqual([]);
+});
+
+test("only confirmed variants with a same-provider base move to the tier picker", async () => {
+  const base = { provider: "one", id: "gpt-6.2-sol" };
+  const fast = { ...base, id: "accelerated", upstreamModelId: base.id, serviceTier: "priority" };
+  const solo = { provider: "two", id: "gpt-6.2-sol-ultrafast" };
+  const state = { model: solo, serviceTier: "ultrafast", thinkingLevel: "medium" };
+  const rpc = {
+    getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
+    request: async () => ({ data: { models: [base, fast, solo] } }),
+  };
+  expect((await modelChoices(rpc, state, "models")).map(row => row.label)).toEqual([base.id, solo.id]);
+  expect(await modelChoices(rpc, state, "tiers")).toEqual([]);
+  expect(appliedSettings(state)).toEqual({ model: base.id, tier: "ultrafast", thinking: "medium" });
+  expect(appliedSettings({ model: solo })).toEqual({ model: solo.id, tier: "", thinking: "" });
+  const [baseChoice, fastChoice] = await modelChoices(rpc, { model: base }, "tiers");
+  expect(baseChoice?.label).toBe("Base model");
+  expect(fastChoice?.label).toBe("fast");
+  if (!fastChoice || !("provider" in fastChoice.target)) throw new Error("Missing fast tier");
+  expect(settingApplied({ model: fast }, fastChoice.target)).toBe(false);
+  expect(settingApplied({ model: fast, serviceTier: "priority" }, fastChoice.target)).toBe(true);
+  expect((await modelChoices(rpc, { model: fast }, "models")).find(row => row.current)?.target)
+    .toEqual({ provider: fast.provider, modelId: fast.id });
+});
+
+test("Thinking choices come from the active model and a write must match session readback", async () => {
+  const calls: unknown[] = [];
+  const rpc = { request: async (cmd: string, fields?: RpcRecord) => {
+    calls.push([cmd, fields]);
+    return { data: { levels: ["low", "medium"] } };
+  } };
+  expect(await thinkingChoices(rpc, {})).toEqual([]);
+  const levels = await thinkingChoices(rpc, { model: { id: "model" }, thinkingLevel: "low" });
+  expect(levels.map(row => [row.label, row.current])).toEqual([["low", true], ["medium", false]]);
+  const choice = levels[1]?.target;
+  if (!choice || !("level" in choice)) throw new Error("Missing Thinking choice");
+  await changeSetting(rpc, choice);
+  expect(settingApplied({ thinkingLevel: "low" }, choice)).toBe(false);
+  expect(settingApplied({ thinkingLevel: "medium" }, choice)).toBe(true);
+  expect(calls).toEqual([["get_available_thinking_levels", undefined],
+    ["set_thinking_level", { level: "medium", scope: "turn" }]]);
 });
 
 test("keyboard and pointer can only activate a visible row of this picker", () => {

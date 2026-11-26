@@ -9,11 +9,12 @@ import omoIcon from "./omo-icon.svg" with { type: "text" };
 import { dialog } from "./dialog";
 import { resumeFields, sessionActivity } from "./session";
 import { listSavedSessions } from "./history";
-import { applyModel, availableModels, Picker, savedRows, selectedSession } from "./picker";
+import { Picker, savedRows, selectedSession } from "./picker";
+import { SessionSettings, settingAction, settingsCss, settingsDisabled, settingsNode } from "./model-settings";
 import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
-import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
+import { renderUsage, supportsUsage, UsageMeter, usageCss } from "./usage";
 import { ComposerMode } from "./composer-mode";
 import { composerCss } from "./composer-style";
 import { PaneTerminal } from "./pane-terminal";
@@ -41,7 +42,12 @@ let submitting = false, stopping = false, activity = 0;
 let status: "" | "Opening session…" | "Stopping…" = "Opening session…";
 let seq = 0, answering = false, failureShown = false;
 let ask: ReturnType<typeof dialog> | undefined;
-let picker: Picker | undefined, currentModel: RpcRecord = {};
+let picker: Picker | undefined;
+const settings = new SessionSettings((model, ops) => {
+  void quota?.setModel(model);
+  frame(...ops);
+  refresh();
+});
 let workflowAvailable = false;
 let toastId: string | undefined;
 const attachments = new Map<string, Attachment>();
@@ -98,8 +104,8 @@ async function paste(mime: string, bytes: Buffer) {
 function cancelPaste() { pasteEpoch++; clipboard.cancel(); }
 
 function refresh() {
-  const canSend = ready && !busy && !submitting && !stopping && !ask && !picker;
-  const reason = attachmentError || (!attachments.size ? undefined : sendBlock([...attachments.values()], currentModel.input));
+  const canSend = ready && !busy && !submitting && !stopping && !ask && !picker && !settings.applying;
+  const reason = attachmentError || (!attachments.size ? undefined : sendBlock([...attachments.values()], settings.input));
   if (!canSend) slash.close();
   const backgroundView = background?.view;
   const { agents, jobs, jobsMayBeHigher } = backgroundView?.running ?? { agents: 0, jobs: 0 };
@@ -115,7 +121,7 @@ function refresh() {
     ["set", "attachments", { hidden: !!ask || !attachments.size }],
     ["set", "attachment-error", { hidden: !!ask || !reason, text: reason ?? "" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
-    ["set", "model", { disabled: !canSend }], ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
+    ...settingsDisabled(!canSend), ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
     ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
     ["set", "session-ulw", { hidden: border !== "ulw-running" }],
@@ -150,7 +156,7 @@ function notify(text: string, tone: "info" | "error" = "info") {
   toastId = nextId;
 }
 function fail(e: unknown) {
-  ready = false; busy = false;
+  ready = false; busy = false; settings.invalidate();
   composerMode.clear();
   showPending([]);
   quota?.close(); quota = undefined;
@@ -171,7 +177,7 @@ function fail(e: unknown) {
 }
 async function close() {
   if (closing) return;
-  closing = true; terminal.closing(); unsubscribe?.();
+  closing = true; settings.invalidate(); terminal.closing(); unsubscribe?.();
   cancelPaste(); input.expireClipboardFrame();
   quota?.close();
   workflow.disconnect();
@@ -224,7 +230,11 @@ function onRpc(e: RpcRecord) {
   if (e.type === "session_closed") { fail("OmO session closed"); return; }
   if (e.type === "queue_update") { showPending(e.ordered); return; }
   void quota?.event(e);
-  if (e.type === "model_changed" && Object.keys(record(e.model)).length) showModel(e.model);
+  if (ready && rpc && !settings.applying &&
+      (e.type === "model_changed" || e.type === "thinking_level_changed" || e.type === "service_tier_changed")) {
+    if (picker && picker.kind !== "sessions") { removePicker(); refresh(); }
+    void settings.observed(rpc, e);
+  }
   if (background?.observe(e)) {
     workflow.background(background.view);
     refresh();
@@ -270,7 +280,10 @@ async function start(hello: RpcRecord) {
     process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
   }
   transcript = new Transcript(frame, phases => workflow.todo(phases), authorIcon);
-  screen.send("s", { sf: surface, name: "omo-composer", css: composerCss });
+  screen.send("s", { sf: surface, name: "omo-composer", css: `
+    ${composerCss}
+    ${settingsCss}
+  ` });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [
     node("welcome", "card", { role: "omp.welcome" }, [
@@ -293,9 +306,7 @@ async function start(hello: RpcRecord) {
       node("line", "row", { role: "omp.composer.line", align: "start", gap: "sm" }, [
         node("draft", "editor", { aria: "Message OMO", placeholder: "Message OMO", maxLines: 8, readonly: true, grow: 1 }),
       ]), node("footer", "row", { role: "omp.composer.bar", align: "center", gap: "sm" }, [
-        node("model", "button", { text: "OMO", variant: "quiet", title: "Choose model", disabled: true,
-          actions: { click: "models" } }),
-        ...(quotaAvailable ? [usageNode()] : []), node("gap", "row", { grow: 1 }),
+        settingsNode(quotaAvailable), node("gap", "row", { grow: 1 }),
         ...(workflowAvailable ? [node("workflow-toggle", "button", { text: "Workflow", variant: "quiet",
           title: "Toggle workflow (Ctrl+G)", actions: { click: "workflow" } })] : []),
         node("stop", "button", { role: "omp.composer.stop", title: "Stop turn", aria: "Stop turn",
@@ -348,18 +359,12 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     for (const message of history) transcript.message(message);
     busy = state.isStreaming === true; ready = true; status = "";
     showPending(state.ordered);
-    showModel(state.model);
+    settings.show(state);
     frame(["focus", "draft"]);
-    refresh();
     if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
     pending.forEach(onRpc);
     void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
     await slash.bind(client);
-}
-function showModel(value: unknown) {
-  currentModel = record(value);
-  void quota?.setModel(value);
-  frame(["set", "model", { text: plain(string(currentModel.name) || string(currentModel.id) || string(value) || "No model selected") }]);
 }
 function removePicker() {
   if (!picker) return;
@@ -367,7 +372,7 @@ function removePicker() {
   picker = undefined;
 }
 function openPicker(kind: Picker["kind"]) {
-  if (picker || ask || (kind === "models" && (!ready || busy))) return;
+  if (picker || ask || (kind !== "sessions" && (!ready || busy || submitting || stopping || settings.applying))) return;
   const p = picker = new Picker(kind, `pick${++seq}`);
   cancelPaste();
   frame(add("layer", node(p.id, "picker", p.props(true))), ["focus", null]);
@@ -378,7 +383,7 @@ async function loadPicker(p: Picker) {
   frame(["set", p.id, p.props()]);
   try {
     if (p.kind === "sessions") p.load(savedRows(await listSavedSessions(cwd)));
-    else if (rpc) p.load(await availableModels(rpc, currentModel));
+    else if (rpc) p.load(await settings.choices(rpc, p.kind));
   } catch (e) { p.state = "error"; p.message = why(e); }
   if (picker === p && !closing) frame(["set", p.id, p.props(true)]);
 }
@@ -386,7 +391,7 @@ async function choose(p: Picker) {
   const target = p.choice?.target;
   if (!target || p.applying) return;
   const client = rpc;
-  if (!("path" in target) && (!ready || !client || busy || ask)) {
+  if (!("path" in target) && (!ready || !client || busy || submitting || stopping || ask || settings.applying)) {
     removePicker(); refresh(); return;
   }
   p.applying = true; p.state = "loading";
@@ -401,12 +406,12 @@ async function choose(p: Picker) {
       return;
     }
     if (!client) throw new Error("No active OmO session");
-    const model = await applyModel(client, target);
+    await settings.apply(client, target);
     if (closing || !ready) return;
-    showModel(model);
-    if (p === picker) { removePicker(); refresh(); }
+    if (p === picker) removePicker();
+    refresh();
   } catch (e) {
-    if (p !== picker || closing) return;
+    if (p !== picker || closing) { if (!closing) refresh(); return; }
     p.applying = false; p.state = "error"; p.message = why(e);
     frame(["set", p.id, p.props()]);
   }
@@ -425,14 +430,14 @@ function pickerInput(p: Picker, i: Input) {
 async function submit(mode: SubmitMode, supplied?: string) {
   const text = supplied ?? editor.text;
   if (ask) { if (mode === "prompt" && ask.typed && text.trim()) await answer(ask.typed(text)); return; }
-  if (!ready || !rpc || picker || submitting || stopping || (!text.trim() && !attachments.size)) return;
+  if (!ready || !rpc || picker || submitting || stopping || settings.applying || (!text.trim() && !attachments.size)) return;
   if (pasting || clipboard.pending) { notify("Wait for the paste to finish."); return; }
   if (mode === "prompt" && busy) {
     if (supplied === undefined) notify("Turn running. Use ⌘+Enter to steer or Ctrl+Enter to queue.");
     return;
   }
   if (mode !== "prompt" && !busy) return;
-  const reason = sendBlock([...attachments.values()], currentModel.input);
+  const reason = sendBlock([...attachments.values()], settings.input);
   if (reason) { notify(`${reason} Remove unsupported attachments before sending.`, "error"); return; }
   if (attachments.size && /^\/[\p{L}\p{N}_:-][\p{L}\p{N}_.:-]*(?:\s|$)/u.test(text.trimStart())) {
     notify("Send attachments with a message, not a slash command.", "error"); return;
@@ -585,7 +590,8 @@ function handle(i: Input) {
         }
         if (e.act === "insert-command" && typeof e.id === "string") { insertCommand(e.id); return; }
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
-        if (e.id === "model" && e.act === "models") openPicker("models");
+        const kind = settingAction(e);
+        if (kind) { openPicker(kind); return; }
         if (e.id === "stop" && e.act === "stop") void stop();
         if (e.id === "send" && e.act === "submit") void submit("prompt");
         if (ask && e.act === "choose") {
