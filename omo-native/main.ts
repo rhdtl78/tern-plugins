@@ -13,6 +13,7 @@ import { listSavedSessions } from "./history";
 import { Picker, savedRows, selectedSession } from "./picker";
 import { modelSettingsKey, SessionSettings, settingsCss, settingsNode } from "./model-settings";
 import { SettingsPicker } from "./settings-picker";
+import { settingsPanelCss } from "./settings-panel-style";
 import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
@@ -125,7 +126,7 @@ function refresh() {
     ["set", "attachments", { hidden: !!ask || !attachments.size }],
     ["set", "attachment-error", { hidden: !!ask || !reason, text: reason ?? "" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
-    ["set", "model", { disabled: !canSend && !(picker instanceof SettingsPicker && picker.menuOpen) }],
+    ["set", "model", { disabled: !canSend && !(picker instanceof SettingsPicker && !picker.applying) }],
     ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
     ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
@@ -300,6 +301,7 @@ async function start(hello: RpcRecord) {
   screen.send("s", { sf: surface, name: "omo-composer", css: `
     ${composerCss}
     ${settingsCss}
+    ${settingsPanelCss}
   ` });
   if (quotaAvailable) screen.send("s", { sf: surface, name: "omo-subscription-usage", css: usageCss });
   frame(add(surface, node("main", "col", {}, [welcomeCard()])), add(surface, node("dock", "col", {}, [
@@ -418,8 +420,7 @@ async function restoreAfterChange(client: OmoRpc, text: string, replaced: boolea
 }
 function removePicker() {
   if (!picker) return;
-  frame(picker instanceof SettingsPicker && picker.menuOpen
-    ? ["set", "model", { open: false, active: "", items: [] }] : ["del", picker.id],
+  frame(...(picker instanceof SettingsPicker ? picker.remove() : [["del", picker.id]]),
     ["focus", ready ? "draft" : null]);
   picker = undefined; cancelPaste();
 }
@@ -428,21 +429,14 @@ function openPicker(kind: Picker["kind"]) {
   const id = `pick${++seq}`;
   const p = picker = kind === "settings" ? new SettingsPicker(id) : new Picker(kind, id);
   cancelPaste();
-  if (p instanceof SettingsPicker) frame(["set", "model", p.menuProps()], ["focus", null]);
+  if (p instanceof SettingsPicker) frame(...p.mount(), ["focus", null]);
   else frame(add("layer", node(p.id, "picker", p.props(true))), ["focus", null]);
   refresh(); void loadPicker(p);
-}
-function settingsSheet(p: SettingsPicker) {
-  p.menuOpen = false;
-  frame(["set", "model", { open: false, active: "", items: [] }],
-    add("layer", node(p.id, "picker", p.props(true))));
-  refresh();
 }
 async function loadPicker(p: Picker) {
   if (p instanceof SettingsPicker && rpc)
     return p.reload({ settings, client: rpc, live: () => picker === p && !closing,
-      draw: () => p.menuOpen ? frame(["set", "model", { disabled: false, ...p.menuProps() }])
-        : frame(["set", p.id, p.props(true)]) });
+      draw: () => frame(...p.draw()) });
   p.state = "loading"; p.message = "";
   frame(["set", p.id, p.props()]);
   try {
@@ -466,12 +460,9 @@ async function choose(p: Picker) {
   if (ready ? !client || busy || submitting || stopping || ask || settings.applying : p.kind !== "sessions") {
     removePicker(); refresh(); return;
   }
-  if (p instanceof SettingsPicker && p.menuOpen) {
-    if (p.choice?.current) { removePicker(); refresh(); return; }
-    settingsSheet(p);
-  }
+  if (p instanceof SettingsPicker && p.choice?.current) { removePicker(); refresh(); return; }
   p.applying = true; p.state = "loading";
-  frame(["set", p.id, p.props()]);
+  drawPicker(p);
   try {
     if (target && "path" in target) {
       const { fields, verify } = await selectedSession(target, cwd);
@@ -505,15 +496,26 @@ async function choose(p: Picker) {
   } catch (e) {
     if (p !== picker || closing) { if (!closing) refresh(); return; }
     p.applying = false; p.state = "error"; p.message = why(e);
-    frame(["set", p.id, p.props()]);
+    drawPicker(p);
   }
 }
+function drawPicker(p: Picker) {
+  if (p instanceof SettingsPicker) frame(...p.draw());
+  else frame(["set", p.id, p.props()]);
+}
 function pickerInput(p: Picker, i: Input) {
-  if (p instanceof SettingsPicker && p.menuOpen) {
-    switch (p.menuInput(i)) {
-      case "draw": frame(["set", "model", p.menuProps()]); break;
-      case "models": settingsSheet(p); break;
-      case "retry": settingsSheet(p); void loadPicker(p); break;
+  if (p instanceof SettingsPicker) {
+    switch (p.input(i)) {
+      case "draw": drawPicker(p); break;
+      case "select": frame(["set", "sp-list", { selected: `sp-${p.selected}` }]); break;
+      case "retry": void loadPicker(p); break;
+      case "back": {
+        const reload = p.state === "error";
+        p.page("settings");
+        if (reload) void loadPicker(p);
+        else drawPicker(p);
+        break;
+      }
       case "use": void choose(p); break;
       case "close": removePicker(); refresh(); break;
     }
@@ -524,17 +526,6 @@ function pickerInput(p: Picker, i: Input) {
     case "use": void choose(p); break;
     case "draw": frame(["set", p.id, p.props()]); break;
     case "retry": void loadPicker(p); break;
-    case "back":
-      if (p instanceof SettingsPicker) {
-        const reload = p.state === "error";
-        p.page("settings"); p.menuOpen = true;
-        if (reload) {
-          frame(["del", p.id]);
-          void loadPicker(p);
-        } else frame(["del", p.id], ["set", "model", { disabled: false, ...p.menuProps() }]);
-        refresh();
-      }
-      break;
     case "close":
       removePicker();
       if (p.kind === "sessions" && !ready) void close(); else refresh();
@@ -721,8 +712,7 @@ function handle(i: Input) {
     if (picker) { pickerInput(picker, i); return; }
     switch (e.ev) {
       case "toggle":
-        if (e.id === "model" && e.open === true) openPicker("settings");
-        else transcript.fold(string(e.id), e.collapsed === true);
+        transcript.fold(string(e.id), e.collapsed === true);
         return;
       case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
       case "send":
@@ -732,6 +722,7 @@ function handle(i: Input) {
         }
         return;
       case "action":
+        if (e.id === "model" && e.act === "settings") { openPicker("settings"); return; }
         if (e.act === "remove-attachment" && typeof e.id === "string" && e.id.endsWith(".remove") &&
             !ask && !submitting && attachments.delete(e.id.slice(0, -7))) {
           frame(["del", e.id.slice(0, -7)], ["focus", "draft"]); attachmentError = ""; refresh();
