@@ -1,6 +1,6 @@
 # OMO Native for Tern
 
-[Back to the Tern plugin collection](../../README.md)
+[Back to the Tern plugin collection](../README.md)
 
 OMO Native opens a local OmO session as a native chat tab in Tern. It streams replies, renders assistant Markdown, and shows tool activity in expandable cards. The tab runs its own `omo` process over standard input and output rather than embedding the OmO terminal UI.
 
@@ -11,7 +11,7 @@ Use a local Tern session with **Native program surfaces** enabled. Install Bun a
 From the repository root, link and check the plugin:
 
 ```sh
-tern plugin link "$PWD/plugins/omo-native"
+tern plugin link "$PWD/omo-native"
 tern plugin list
 ```
 
@@ -22,6 +22,33 @@ To unlink only OMO Native:
 ```sh
 tern plugin unlink omo-native
 ```
+
+### Use the current shell pane instead of opening a tab
+
+From the checkout root, opt in for **this interactive Bash or Zsh shell only**:
+
+```sh
+source "$PWD/omo-native/shell-integration.sh"
+cd "/path/to/your/project"
+omo
+```
+
+`omo` negotiates an inline chat with the terminal. `omo --resume` and `omo -r`
+open the saved-session picker for the directory you are in when you run them.
+Press **Ctrl+D** to return to the same shell, or **Escape** to cancel the picker.
+The shell waits while the chat is open. Workflow can still open its own split.
+
+The function never replaces the installed executable or an existing `omo`
+alias/function. Without a TSP reply (including when **Native program surfaces**
+is off), it runs the ordinary CLI once with the original arguments. Other
+arguments, pipes, redirections, noninteractive shells and terminal multiplexers
+use the ordinary CLI. After TSP accepts the session, an error is shown in place;
+it does not start a second TUI. To bypass the function once, use `command omo`.
+
+Linking the palette plugin and sourcing the shell function are independent.
+If you sourced the function and it was installed, undo just that opt-in with
+`unset -f omo; unset _omo_native_dir`, or start a fresh shell. No shell profile
+or OmO session files need changing. Unlink the plugin separately if desired.
 
 ## Start and control a session
 
@@ -88,14 +115,14 @@ You can also launch the picker directly from a local Tern terminal:
 
 ```sh
 cd "/absolute/path/to/saved-working-directory" &&
-  bun run "/absolute/path/to/tern-plugins/plugins/omo-native/main.ts" --resume
+  bun run "/absolute/path/to/tern-plugins/omo-native/main.ts" --resume
 ```
 
 To bypass the picker, pass an absolute path:
 
 ```sh
 cd "/absolute/path/to/saved-working-directory" &&
-  bun run "/absolute/path/to/tern-plugins/plugins/omo-native/main.ts" \
+  bun run "/absolute/path/to/tern-plugins/omo-native/main.ts" \
     --session "/absolute/path/to/session.jsonl"
 ```
 
@@ -107,7 +134,7 @@ Replace both file paths with the actual paths to the plugin entry and the saved 
 
 Plan reads the workspace's Boulder v2 registry (`.omo/boulder.json`) for an exact match to the durable OmO session ID. A plain Todo does not create a link. A registered worktree may supply a copy under `.omo/plans/`; if that copy is absent, Plan can use the original. An unverified worktree or unsafe file path hides the link. A lost RPC connection marks the last data disconnected. Closing the chat closes the split; resume the chat to reconnect.
 
-Run `bun test ./plugins/omo-native` from the repository root. To exercise the native pickers in an isolated Tern profile:
+Run `bun test ./omo-native` from the repository root. To exercise the native pickers in an isolated Tern profile:
 
 1. Open **OMO: New Session**, type a draft, then click `[data-id="model"]`. In `.sf-picker[data-role="omo.models"]`, type a query and inspect `.pk-search .q` and `.pk-row.sel`. Cancel and check that `[data-id="draft"]` still contains the unsent text.
 2. Reopen the picker and select another provider/model pair. Click `[data-pk="act"][data-v="use"]`. Check that the footer changes without a new transcript entry. Send the draft explicitly and check the selected model in the isolated engine log.
