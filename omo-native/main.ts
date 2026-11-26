@@ -15,6 +15,7 @@ import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
 import { renderUsage, supportsUsage, UsageMeter, usageCss, usageNode } from "./usage";
 import { ComposerMode } from "./composer-mode";
+import { PaneTerminal } from "./pane-terminal";
 import { Clipboard, clipboardTimeoutNotice } from "./clipboard";
 import { attachmentCard, attachmentCount, attachmentsCss, clipboardFile, clipboardImage, fileEntries, sendBlock, type Attachment } from "./attachments";
 
@@ -51,9 +52,10 @@ const clipboard = new Clipboard(packet => process.stdout.write(packet), (mime, b
   clipboardError(reason);
 });
 const pendingRows = new Set<string>();
-const args = process.argv.slice(2), resume = args.length === 1 && args[0] === "--resume";
+const fromShell = process.argv[2] === "--from-shell", args = process.argv.slice(fromShell ? 3 : 2);
+const resume = args.length === 1 && (args[0] === "--resume" || args[0] === "-r");
+const terminal = new PaneTerminal(input, fromShell);
 const waiting = new Map<string, RpcRecord>();
-let timer: ReturnType<typeof setTimeout>, esc: ReturnType<typeof setTimeout>;
 const why = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 const canPaste = () => ready && !closing && !picker && !ask;
 function clipboardError(reason: string) { if (canPaste()) { attachmentError = reason; refresh(); } }
@@ -167,7 +169,7 @@ function fail(e: unknown) {
 }
 async function close() {
   if (closing) return;
-  closing = true; clearTimeout(timer); clearTimeout(esc); unsubscribe?.();
+  closing = true; terminal.closing(); unsubscribe?.();
   cancelPaste(); input.expireClipboardFrame();
   quota?.close();
   workflow.disconnect();
@@ -175,9 +177,7 @@ async function close() {
   try { await Promise.all([rpc?.close(), workflowLifetime]); }
   finally {
     if (live) screen.send("x", { id: surface, keep: !resume || ready });
-    process.stdout.write("\x1b[<u\x1b[?2004l\x1b[?5522l");
-    await Bun.sleep(60);
-    process.stdin.setRawMode(false); process.stdin.pause();
+    await terminal.restore();
     process.exit(process.exitCode ?? 0);
   }
 }
@@ -254,7 +254,7 @@ function onRpc(e: RpcRecord) {
   if (welcome && transcript.populated) refresh();
 }
 async function start(hello: RpcRecord) {
-  clearTimeout(timer); live = true; screen.negotiate(hello);
+  live = true; screen.negotiate(hello);
   quotaAvailable = supportsUsage(hello);
   workflowAvailable = supportsWorkflow(hello) && !!process.env.TERN_PANE && !!Bun.which("tern");
   // omp.session is Tern's built-in chat stylesheet, not the program's identity.
@@ -658,7 +658,6 @@ function handle(i: Input) {
   }
   if (i.kind === "event") {
     const e = i.value;
-    if (!live && e.r === "hello" && e.v === 1) { void start(e); return; }
     if (!live || e.sf !== surface) return;
     switch (e.ev) {
       case "ack": screen.ack(e.s); return;
@@ -717,16 +716,5 @@ if (args[0] === "--workflow-pane" && args.length === 6 && args[1] && /^[a-f0-9]{
 } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
   console.error("OMO Native needs a Tern pane with native program surfaces enabled."); process.exitCode = 1;
 } else {
-  process.stdin.setRawMode(true).setEncoding("utf8").on("data", (chunk: string) => {
-    clearTimeout(esc); input.feed(chunk).forEach(handle);
-    if (chunk.endsWith("\x1b")) esc = setTimeout(() => input.feed("", true).forEach(handle), 40);
-  }).once("end", close).resume();
-  for (const signal of ["SIGINT","SIGHUP","SIGTERM"] as const) process.once(signal, close);
-  process.stdout.on("error", close);
-  screen.send("q", { q: "hello", app: "omo", v: [1], features: ["edit","send","undo"] });
-  process.stdout.write("\x1b[c\x1b[?2004h\x1b[?5522h\x1b[>1u");
-  timer = setTimeout(() => {
-    process.stderr.write("OMO Native: Tern did not negotiate a surface. Enable Native program surfaces and reopen this pane.\r\n");
-    process.exitCode = 1; void close();
-  }, 1500);
+  terminal.listen(screen, { start, handle, close });
 }
