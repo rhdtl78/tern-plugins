@@ -33,13 +33,16 @@ type UndoStep = {
 const undoLimit = 100;
 
 export class Editor {
-  text = "";
+  #text = "";
+  #revision = 0;
+  get text() { return this.#text; }
+  get revision() { return this.#revision; }
   cursor = 0;
   #undo: UndoStep[] = [];
   #redo: UndoStep[] = [];
   #column?: number;
   reset(text: string, cursor = text.length) {
-    this.text = text; this.cursor = cursor;
+    this.#text = text; this.#revision++; this.cursor = cursor;
     this.#undo = []; this.#redo = []; this.#column = undefined;
   }
   #replace(from: number, to: number, text: string, cursor = from + text.length) {
@@ -49,7 +52,8 @@ export class Editor {
       this.#undo.push({ from, inserted: text, removed, before: this.cursor, after });
       if (this.#undo.length > undoLimit) this.#undo.shift();
       this.#redo = [];
-      this.text = this.text.slice(0, from) + text + this.text.slice(to);
+      this.#text = this.text.slice(0, from) + text + this.text.slice(to);
+      this.#revision++;
     }
     this.cursor = after;
     this.#column = undefined;
@@ -61,7 +65,8 @@ export class Editor {
     const { from, inserted, removed, before, after } = step;
     const previous = redo ? removed : inserted;
     const next = redo ? inserted : removed;
-    this.text = this.text.slice(0, from) + next + this.text.slice(from + previous.length);
+    this.#text = this.text.slice(0, from) + next + this.text.slice(from + previous.length);
+    this.#revision++;
     this.cursor = redo ? after : before;
     this.#column = undefined;
     (redo ? this.#undo : this.#redo).push(step);

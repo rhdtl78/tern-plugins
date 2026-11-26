@@ -417,7 +417,7 @@ async function restoreAfterChange(client: OmoRpc, text: string, replaced: boolea
 function removePicker() {
   if (!picker) return;
   frame(["del", picker.id], ["focus", ready ? "draft" : null]);
-  picker = undefined;
+  picker = undefined; cancelPaste();
 }
 function openPicker(kind: Picker["kind"]) {
   if (picker || ask || (kind !== "sessions" && (!ready || busy || submitting || stopping || settings.applying))) return;
@@ -502,7 +502,7 @@ function pickerInput(p: Picker, i: Input) {
       break;
   }
 }
-async function runSessionCommand(command: NonNullable<ReturnType<typeof sessionCommand>>) {
+async function runSessionCommand(command: NonNullable<ReturnType<typeof sessionCommand>>, draftRevision: number | undefined) {
   if (!rpc || !ready || ask || picker || busy || stopping || submitting || settings.applying) return;
   if (pasting || clipboard.pending) { notify("Wait for the paste to finish."); return; }
   if (attachments.size) { notify("Send attachments with a message, not a slash command.", "error"); return; }
@@ -516,10 +516,10 @@ async function runSessionCommand(command: NonNullable<ReturnType<typeof sessionC
     if (name === "session") {
       const stats = record((await client.request("get_session_stats")).data);
       notify(`Session ${string(stats.sessionId)} · ${Number(stats.totalMessages) || 0} messages · ${Number(record(stats.tokens).total) || 0} tokens`);
-      draft.reset("");
+      if (draft.revision === draftRevision) draft.reset("");
     } else if (name === "name" || name === "rename") {
       await client.request("set_session_name", { name: argument });
-      notify("Session renamed."); draft.reset("");
+      notify("Session renamed."); if (draft.revision === draftRevision) draft.reset("");
     } else {
       const { data } = await client.request(name === "new" ? "new_session" : "clone");
       if (record(data).cancelled !== true) await restoreAfterChange(client, "", true);
@@ -534,7 +534,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
   if (pasting || clipboard.pending) { notify("Wait for the paste to finish."); return; }
   const command = sessionCommand(text);
   if (command) {
-    if (mode === "prompt" && !busy) await runSessionCommand(command);
+    if (mode === "prompt" && !busy) await runSessionCommand(command, text === draft.text ? draft.revision : undefined);
     return;
   }
   if (mode === "prompt" && busy) {
@@ -660,7 +660,7 @@ function insertCommand(id?: unknown) {
   const text = slash.pick(id);
   if (!text) return;
   const local = sessionCommand(text);
-  if (local) { void runSessionCommand(local); return; }
+  if (local) { void runSessionCommand(local, draft.revision); return; }
   draft.replaceDraft(text);
   frame(["focus", "draft"]); refresh();
 }

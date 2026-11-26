@@ -2,8 +2,11 @@ export const model = "Fixture model";
 export const warning = "Hot-reloaded: fixture/omo.jsonc";
 export const refusal = "fixture refused startup";
 
-export type Scenario = "notice" | "composer" | "queue" | "clipboard" | "ulw";
+export type Scenario = "notice" | "composer" | "queue" | "clipboard" | "ulw" | "session" | "session-refused";
 export const promptsFile = "prompts.jsonl";
+export const sessionCallsFile = "session-calls.jsonl";
+export const sessionPending = "Fixture session command pending";
+export const sessionRefusal = "Fixture session command refused";
 export const checkpoint = {
   acknowledged: "acknowledged",
   stopped: "stopped",
@@ -43,6 +46,18 @@ async function waitForCheckpoint(marker) {
 
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, type, ...fields } = JSON.parse(line);
+  if (${scenario === "session" || scenario === "session-refused"}) {
+    if (["open_session", "switch_session", "get_session_stats", "set_session_name", "prompt"].includes(type))
+      appendFileSync(${JSON.stringify(sessionCallsFile)}, JSON.stringify([type, fields.name ?? fields.message ?? null]) + "\\n");
+    if (type === "get_session_stats" || type === "set_session_name") {
+      send({ type: "extension_ui_request", method: "notify", message: ${JSON.stringify(sessionPending)} });
+      await waitForCheckpoint(checkpoint.acknowledged);
+      const success = ${scenario !== "session-refused"};
+      send({ id, type: "response", command: type, success,
+        ...(success ? { data: { sessionId, totalMessages: 3 } } : { error: ${JSON.stringify(sessionRefusal)} }) });
+      continue;
+    }
+  }
   if (queue && (type === "steer" || type === "follow_up")) {
     if (fields.expectedTurnId !== turn) process.exit(10);
     if (fields.message === "refused") {
