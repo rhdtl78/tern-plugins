@@ -10,20 +10,20 @@ A personal collection of plugins for the Tern terminal, maintained by [@rhdtl78]
 
 ## Plugins
 
-- **[OMO Native](plugins/omo-native/README.md)** — Native OmO chat in Tern with streamed replies, expandable tool activity, and saved-session resume.
+- **[OMO Native](omo-native/README.md)** — Native OmO chat in the invoking Tern shell or an explicit palette tab, with streamed replies, expandable tool activity, and saved-session resume.
 
 ## Quick start
 
 To try OMO Native, use a local Tern session with **Native program surfaces** enabled. Install Bun and the `omo` executable, then run these commands from the root of your local checkout:
 
 ```sh
-tern plugin link "$PWD/plugins/omo-native"
+tern plugin link "$PWD/omo-native"
 tern plugin list
 ```
 
 Look for `omo-native` in the list. Keep the plugin directory in place while it's linked. Open Tern's command palette and choose **OMO: New Session**.
 
-See the [OMO Native guide](plugins/omo-native/README.md) for setup details, session controls, and how to unlink the plugin.
+To use `omo` directly in the current Bash or Zsh pane, source `"$PWD/omo-native/shell-integration.sh"` before changing to your project. See the [OMO Native guide](omo-native/README.md) for setup, controls, and rollback.
 
 ## Resources
 
