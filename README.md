@@ -14,16 +14,14 @@ A personal collection of plugins for the Tern terminal, maintained by [@rhdtl78]
 
 ## Quick start
 
-To try OMO Native, use a local Tern session with **Native program surfaces** enabled. Install Bun and the `omo` executable, then run these commands from the root of your local checkout:
+Choose a plugin from [Plugins](#plugins) and check its README for prerequisites. With `git` on your `PATH`, run:
 
 ```sh
-tern plugin link "$PWD/omo-native"
+tern plugin install github.com/rhdtl78/tern-plugins/PLUGIN_DIR
 tern plugin list
 ```
 
-Look for `omo-native` in the list. Keep the plugin directory in place while it's linked. Open Tern's command palette and choose **OMO: New Session**.
-
-To use `omo` directly in the current Bash or Zsh pane, source `"$PWD/omo-native/shell-integration.sh"` before changing to your project. See the [OMO Native guide](omo-native/README.md) for setup, controls, and rollback.
+Replace `PLUGIN_DIR` with the chosen plugin's directory in this repository. Tern installs it from GitHub without a local checkout. Confirm the plugin appears in the list, then follow its README to get started.
 
 ## Resources
 

@@ -8,27 +8,25 @@ OMO Native opens a local OmO session as a native chat tab in Tern. It streams re
 
 Use a local Tern session with **Native program surfaces** enabled. Install Bun and the `omo` executable. The launcher looks for Bun on `PATH` and falls back to `~/.bun/bin/bun`. The plugin looks for `omo` on `PATH`, next to the running Bun executable, then at `~/.bun/bin/omo`.
 
-From the repository root, link and check the plugin:
+With `git` on your `PATH`, install the plugin from GitHub. You don't need a local checkout. If you previously linked OMO Native from a checkout, run `tern plugin unlink omo-native` first. Leave any link for the separate `omo` plugin in place.
 
 ```sh
-tern plugin link "$PWD/omo-native"
+tern plugin install github.com/rhdtl78/tern-plugins/omo-native
 tern plugin list
 ```
 
-Look for `omo-native` in the list. Tern links the package where it is, so keep that directory in place while the link is active. The existing `omo` plugin has a separate ID. Leave its link in place.
-
-To unlink only OMO Native:
+Look for `omo-native` in the list. To remove only the installed OMO Native plugin:
 
 ```sh
-tern plugin unlink omo-native
+tern plugin remove omo-native
 ```
 
 ### Use the current shell pane instead of opening a tab
 
-From the checkout root, opt in for **this interactive Bash or Zsh shell only**:
+After installing the plugin, opt in for **this interactive Bash or Zsh shell only**:
 
 ```sh
-source "$PWD/omo-native/shell-integration.sh"
+source "$(tern plugin dir)/omo-native/shell-integration.sh"
 cd "/path/to/your/project"
 omo
 ```
@@ -45,10 +43,10 @@ arguments, pipes, redirections, noninteractive shells and terminal multiplexers
 use the ordinary CLI. After TSP accepts the session, an error is shown in place;
 it does not start a second TUI. To bypass the function once, use `command omo`.
 
-Linking the palette plugin and sourcing the shell function are independent.
+Installing the plugin does not automatically enable the shell function.
 If you sourced the function and it was installed, undo just that opt-in with
 `unset -f omo; unset _omo_native_dir`, or start a fresh shell. No shell profile
-or OmO session files need changing. Unlink the plugin separately if desired.
+or OmO session files need changing. Remove the plugin separately if desired.
 
 ## Start and control a session
 
@@ -120,18 +118,18 @@ You can also launch the picker directly from a local Tern terminal:
 
 ```sh
 cd "/absolute/path/to/saved-working-directory" &&
-  bun run "/absolute/path/to/tern-plugins/omo-native/main.ts" --resume
+  bun run "$(tern plugin dir)/omo-native/main.ts" --resume
 ```
 
 To bypass the picker, pass an absolute path:
 
 ```sh
 cd "/absolute/path/to/saved-working-directory" &&
-  bun run "/absolute/path/to/tern-plugins/omo-native/main.ts" \
+  bun run "$(tern plugin dir)/omo-native/main.ts" \
     --session "/absolute/path/to/session.jsonl"
 ```
 
-Replace both file paths with the actual paths to the plugin entry and the saved JSONL file. The plugin rejects a relative session path or a working directory that doesn't match the saved one. A successful reopen shows the saved transcript before you send another message.
+Replace the working directory and JSONL path with the actual paths for your saved session. The plugin rejects a relative session path or a working directory that doesn't match the saved one. A successful reopen shows the saved transcript before you send another message.
 
 ## Verification
 
