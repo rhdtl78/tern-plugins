@@ -10,6 +10,8 @@ for (const [name, args, reply, expectedCalls, status] of [
   ["an unanswered probe preserves the short resume argument", "-r", "none", "-r\n", 23],
   ["a negotiated short resume cancels without running either CLI or RPC", "-r", "hello", "", 0],
   ["RPC bypasses the probe", "--mode rpc", "bypass", "--mode rpc\n", 23],
+  ["uppercase short flag bypasses even with nocasematch", "-R", "bypass", "-R\n", 23],
+  ["uppercase long flag bypasses even with nocasematch", "--RESUME", "bypass", "--RESUME\n", 23],
 ] as const) {
   test(name, async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omo-shell-"));
@@ -18,7 +20,8 @@ for (const [name, args, reply, expectedCalls, status] of [
       await writeFile(join(cwd, "omo"), '#!/bin/sh\nprintf "%s\\n" "$*" >> calls\nexit 23\n', { mode: 0o700 });
       let bytes = "", answered = false, closed = false;
       const child = Bun.spawn(["bash", "--noprofile", "--norc", "-ic",
-        `source "$1"; omo ${args}`, "bash", join(import.meta.dir, "shell-integration.sh")], {
+        `shopt -s nocasematch; source "$1"; omo ${args}; rc=$?; shopt -q nocasematch && exit "$rc"; exit 99`,
+        "bash", join(import.meta.dir, "shell-integration.sh")], {
         cwd, timeout: 3500, env: { HOME: cwd, PATH: `${cwd}:${dirname(process.execPath)}:/usr/bin:/bin`,
           TERM_PROGRAM: "tern", TERN_PANE: "1" },
         terminal: { data(pty, data) {

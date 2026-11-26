@@ -13,10 +13,14 @@ _omo_native_dir=$(CDPATH= cd -- "$(dirname -- "$_omo_native_entry")" && pwd -P) 
 unset _omo_native_entry
 
 function omo {
-    if [[ ${TERM_PROGRAM-} == tern && -n ${TERN_PANE-} &&
+    # Single-bracket equality is literal even when Bash enables nocasematch.
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --resume ] && [ "$1" != -r ]; }; then
+        command omo "$@"
+        return $?
+    fi
+    if [ "${TERM_PROGRAM-}" = tern ] && [[ -n ${TERN_PANE-} &&
           -z ${SSH_CONNECTION-}${SSH_TTY-}${TMUX-}${STY-}${ZELLIJ-} &&
-          -t 0 && -t 1 && -t 2 && -r $_omo_native_dir/main.ts &&
-          ( $# == 0 || ( $# == 1 && ( $1 == --resume || $1 == -r ) ) ) ]]; then
+          -t 0 && -t 1 && -t 2 && -r $_omo_native_dir/main.ts ]]; then
         local runner rc=0
         runner=$(command -v bun) || runner=$HOME/.bun/bin/bun
         if [[ -x $runner ]]; then
