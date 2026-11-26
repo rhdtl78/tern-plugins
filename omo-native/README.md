@@ -37,6 +37,32 @@ Open the command palette, search for `OMO`, and select **OMO: New Session**. The
 
 Confirmation requests require an explicit choice. Enter doesn't approve them.
 
+### Edit a draft
+
+Editing shortcuts apply in the focused composer. Tern handles selection,
+clipboard operations, and IME composition; the plugin applies the resulting
+edits and keeps draft undo/redo history. Typing, pasting, or deleting replaces a
+selection. Selecting or moving the caret does not create an undo step.
+
+| Action | macOS | Windows/Linux |
+| --- | --- | --- |
+| Select all | Cmd+A | Ctrl+A |
+| Cut / copy / paste | Cmd+X / Cmd+C / Cmd+V | Ctrl+X / Ctrl+C / Ctrl+V |
+| Undo / redo | Cmd+Z / Cmd+Shift+Z | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
+| Move by character or line | Arrow keys | Arrow keys |
+| Move by word | Option+Left/Right | Ctrl+Left/Right |
+| Move to line start/end | Cmd+Left/Right | Home/End |
+| Move to draft start/end | Cmd+Up/Down | Ctrl+Home/End |
+| Extend selection | Shift with the movement shortcut | Shift with the movement shortcut |
+| Delete backward/forward | Delete / Fn+Delete | Backspace / Delete |
+| Delete by word | Option+Delete / Option+Fn+Delete | Ctrl+Backspace / Ctrl+Delete |
+
+Selection and clipboard bindings follow the host Tern editor and its platform
+keymap. The composer edits plain text: type Markdown for bold (`**text**`),
+italic (`*text*`), or links (`[label](url)`). It does not take over app shortcuts
+such as Cmd+B, Cmd+I, or Cmd+K. When the slash menu is open, unmodified Up/Down
+still navigate the menu.
+
 ### View the workflow
 
 Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of the chat. You can also choose **OMO: Toggle Workflow** from the command palette when a local chat launched by the plugin has focus. The split starts closed and follows only the chat that opened it. When the window has room, Workflow targets an initial width of 420 px. Drag the divider to change its width. Switch pages with the top **DAG** and **Plan** tabs. Use the top **×** or press **Escape** in the split to dismiss it without sending or clearing your draft.

@@ -51,3 +51,50 @@ test("undo retains only the latest 100 changes", () => {
   type(editor, undo.repeat(101));
   expect(state(editor)).toEqual({ text: "x", cursor: 1 });
 });
+
+test("selected multiline replacement can be undone and redone without submitting", () => {
+  const editor = new Editor();
+  const original = "before\n한글 🦉";
+  editor.reset(original);
+  expect(editor.apply({ kind: "event", value: {
+    ev: "edit", id: "draft", len: original.length, from: 0, to: original.length, text: "", cursor: 0,
+  } })).toBe("edit");
+  expect(state(editor)).toEqual({ text: "", cursor: 0 });
+  type(editor, undo);
+  expect(state(editor)).toEqual({ text: original, cursor: original.length });
+  type(editor, "\x1b[122;10u");
+  expect(state(editor)).toEqual({ text: "", cursor: 0 });
+  type(editor, undo);
+  expect(state(editor)).toEqual({ text: original, cursor: original.length });
+});
+
+test("moving the caret preserves redo, but editing or resetting the draft discards it", () => {
+  const editor = new Editor();
+  type(editor, "\x1b[200~one\ntwo\x1b[201~");
+  type(editor, undo + "\x1b[1;5H\x1b[121;5u");
+  expect(state(editor)).toEqual({ text: "one\ntwo", cursor: 7 });
+  type(editor, undo + "x\x1b[122;6u");
+  expect(state(editor)).toEqual({ text: "x", cursor: 1 });
+  type(editor, undo);
+  editor.reset("new");
+  type(editor, "\x1b[122;10u");
+  expect(state(editor)).toEqual({ text: "new", cursor: 3 });
+});
+
+test("vertical moves preserve the preferred column over short and empty lines", () => {
+  const editor = new Editor();
+  editor.reset("1234\nx\n\n🦉한글요", 3);
+  for (const [key, cursor] of [["B", 6], ["B", 7], ["B", 12], ["A", 7], ["A", 6], ["A", 3]] as const) {
+    type(editor, `\x1b[${key}`);
+    expect(editor.cursor).toBe(cursor);
+  }
+});
+
+test("word and character deletions preserve neighboring text", () => {
+  const editor = new Editor();
+  editor.reset("one two\n👩‍💻!", 0);
+  type(editor, "\x1b[3;3~");
+  expect(state(editor)).toEqual({ text: " two\n👩‍💻!", cursor: 0 });
+  type(editor, "\x1b[1;5F\x1b[D\x7f");
+  expect(state(editor)).toEqual({ text: " two\n!", cursor: 5 });
+});

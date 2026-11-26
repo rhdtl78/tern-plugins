@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { checkpoint, model, noticeEngine, promptsFile, refusal, warning, type Checkpoint, type Scenario } from "./notice-fixture";
 import { record, string, surface } from "./surface";
 
 type View = {
@@ -11,9 +13,6 @@ type View = {
 };
 type Views = ReadonlyMap<string, View>;
 const opening = "Opening session…", working = "Working…", stopping = "Stopping…";
-const model = "Fixture model";
-const warning = "Hot-reloaded: fixture/omo.jsonc";
-const refusal = "fixture refused startup";
 const exit = "RPC exited (7)";
 const clipboardDraft = "Synthetic draft to keep";
 const clipboardSuffix = " plus new text";
@@ -43,52 +42,19 @@ const withText = (views: Views, text: string) => visible(views).filter(view => v
 const hasDetail = (views: Views, detail: string) =>
   visible(views).some(view => string(view.props.text).includes(detail));
 
-async function exercise(rejectOpen: boolean, observe: (views: Views, event: (value: object) => void, key: (bytes: string) => void) => boolean | Promise<boolean>,
-  scenario: "notice" | "composer" | "clipboard" = "notice") {
+type FixtureControls = {
+  readonly event: (value: object) => void;
+  readonly key: (bytes: string) => void;
+  readonly release: (marker: Checkpoint) => void;
+};
+
+async function exercise(rejectOpen: boolean, observe: (views: Views, controls: FixtureControls, ops: unknown[]) => boolean,
+  scenario: Scenario = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
-    const promptsPath = join(cwd, "prompts.jsonl");
-    await writeFile(promptsPath, "");
-    await writeFile(join(cwd, "omo"), `#!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
-import { createInterface } from "node:readline";
-const sessionId = "notice-test";
-const send = value => console.log(JSON.stringify({ sessionId, ...value }));
-let prompts = 0, stopCalls = 0;
-const composer = ${scenario === "composer"};
-for await (const line of createInterface({ input: process.stdin })) {
-  const { id, type, ...fields } = JSON.parse(line);
-  if (type === "open_session" && ${rejectOpen}) {
-    send({ id, type: "response", command: type, success: false, error: ${JSON.stringify(refusal)} });
-    continue;
-  }
-  if (composer && type === "steer") {
-    const correct = fields.message === "previous" && fields.expectedTurnId === "turn-one";
-    send({ id, type: "response", command: type, success: false, error: correct ? "fixture turn changed" : "wrong steer request" });
-    continue;
-  }
-  if (composer && type === "prompt") {
-    if (++prompts !== 1 || fields.message !== "Run fixture" ||
-        Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
-  }
-  if (${scenario === "clipboard"} && type === "prompt") appendFileSync("prompts.jsonl", JSON.stringify(fields.message) + "\\n");
-  if (composer && type === "abort" && (++stopCalls !== 1 ||
-      fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined)) process.exit(9);
-  const data = type === "open_session" ? { sessionId, state: { model: { name: ${JSON.stringify(model)} } } }
-    : type === "get_messages" ? { messages: [] }
-    : type === "get_state" ? { isStreaming: true, currentTurnId: "turn-one" }
-    : type === "abort" ? { idle: !composer } : {};
-  send({ id, type: "response", command: type, success: true, data });
-  if (type === "get_messages") send({ type: "extension_ui_request", method: "notify",
-    notifyType: "warning", message: ${JSON.stringify(warning)} });
-  if (type === "prompt") {
-    if (!composer && ++prompts === 2) process.exit(7);
-    send({ type: "agent_start" });
-    send({ type: "extension_ui_request", method: "notify", message: "Fixture turn started" });
-  }
-  if (type === "abort" && !composer) send({ type: "agent_idle" });
-}
-`, { mode: 0o700 });
+    const promptsPath = join(cwd, promptsFile);
+    if (scenario === "clipboard") await writeFile(promptsPath, "");
+    await writeFile(join(cwd, "omo"), noticeEngine(rejectOpen, scenario), { mode: 0o700 });
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     const output = writable.getWriter();
     const child = Bun.spawn([process.execPath, join(import.meta.dir, "main.ts")], {
@@ -100,20 +66,23 @@ for await (const line of createInterface({ input: process.stdin })) {
     const views = new Map<string, View>();
     const send = (value: string) => { child.terminal?.write(value); };
     const event = (value: object) => send(`\x1b_tsp;e;${JSON.stringify({ sf: surface, ...value })}\x1b\\`);
+    const release = (marker: Checkpoint) => writeFileSync(join(cwd, marker), "", { flag: "wx" });
+    const controls = { event, key: send, release };
     try {
       let buffer = "";
       for await (const chunk of readable.pipeThrough(new TextDecoderStream())) {
         buffer += chunk;
         let end: number;
         while ((end = buffer.indexOf("\x1b\\")) !== -1) {
-          const packet = buffer.slice(0, end).split("\x1b_tsp;f;")[1];
-          if (buffer.slice(0, end).includes("\x1b_tsp;q;")) send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
+          const message = buffer.slice(0, end);
+          const packet = message.split("\x1b_tsp;f;")[1];
+          if (message.includes("\x1b_tsp;q;")) send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
           buffer = buffer.slice(end + 2);
           if (!packet) continue;
           const { ops } = record(JSON.parse(packet));
           if (!Array.isArray(ops)) continue;
           apply(views, ops);
-          if (await observe(views, event, send)) send("\x04");
+          if (observe(views, controls, ops)) send("\x04");
         }
       }
       const code = await child.exited;
@@ -142,7 +111,7 @@ test("shows progress outside the composer and keeps engine exit in main", async 
   const phases = new Map<string, Views>();
   const save = (name: string, views: Views) => phases.set(name, new Map(views));
   const submit = { ev: "send", id: "draft", text: "Run fixture" };
-  await exercise(false, (views, event) => {
+  await exercise(false, (views, { event }) => {
     if (!phases.has(opening) && withText(views, opening).length) save(opening, views);
     if (!phases.has("ready") && withText(views, warning).length) {
       save("ready", views);
@@ -196,7 +165,7 @@ test("keeps a refused RPC startup in a durable error card in main", async () => 
 
 test("rejected steer restores both drafts and repeated Escape cannot stop twice before settlement", async () => {
   let step = 0;
-  await exercise(false, (views, event, key) => {
+  await exercise(false, (views, { event, key }) => {
     const draft = views.get("draft")?.props;
     if (step === 0 && withText(views, warning).length) {
       step++;
@@ -227,38 +196,140 @@ test.each([
   ["opening OK", ""],
   ["established DATA", "\x1b]5522;type=read:status=DATA:pw=interrupted:mime=Lg==;dGV4dA=="],
   ["established prefix before semicolon", "\x1b]5522"],
-])("the first Send includes new typing after interrupted clipboard %s expires", async (interrupted, partial) => {
-  let step = 0;
+] as const)(
+  "the first Send includes new typing after interrupted clipboard %s expires", async (interrupted, partial) => {
+  let phase: "ready" | "pasted" | "offer" | "interrupted" | "sent" | "done" = "ready";
+  let firstSend: ReturnType<typeof setTimeout> | undefined;
+  let notices = 0;
   const submit = { ev: "action", id: "send", act: "submit" };
-  await exercise(false, async (views, event, key) => {
+  try {
+    await exercise(false, (views, { event, key }, ops) => {
+      const draft = views.get("draft")?.props;
+      const interrupt = (bytes: string) => {
+        phase = "interrupted";
+        key(bytes);
+        // Allow both deadlines to elapse, even if there is no notice on the broken build.
+        firstSend = setTimeout(() => {
+          phase = "sent";
+          key(clipboardSuffix);
+          event(submit);
+        }, 3600);
+      };
+      if (phase === "ready" && draft?.sendable) {
+        phase = "pasted";
+        key(`\x1b[200~${clipboardDraft}\x1b[201~`);
+      } else if (phase === "pasted" && draft?.text === clipboardDraft) {
+        const offer = "\x1b]5522;type=read:status=OK:pw=interrupted";
+        if (interrupted === "opening OK") interrupt(offer);
+        else {
+          phase = "offer";
+          key(offer + "\x1b\\");
+          event(submit);
+        }
+      } else if (phase === "offer" && hasDetail(views, "Wait for the paste to finish")) {
+        interrupt(partial);
+      } else if (phase === "interrupted") {
+        // Count reports while idle; the suffix's per-key redraws re-emit the same label.
+        for (const op of ops) {
+          if (!Array.isArray(op) || op[0] !== "set" || op[1] !== "attachment-error") continue;
+          const { text, hidden } = record(op[2]);
+          if (text !== "Tern did not complete the paste." || hidden !== false) continue;
+          expect(draft?.text).toBe(clipboardDraft);
+          notices++;
+        }
+      } else if (phase === "sent" && hasDetail(views, "Fixture turn started")) {
+        phase = "done";
+        return true;
+      }
+      return false;
+    }, "clipboard");
+  } finally { clearTimeout(firstSend); }
+  expect(phase).toBe("done");
+  expect(notices).toBe(1);
+}, 8000);
+
+test("projects the engine's steering and follow-up queue above the composer", async () => {
+  let step = 0, sawAckWithoutRows = false;
+  let editStage: "replace" | "undo" | "redo" | "done" = "replace";
+  await exercise(false, (views, { event, key, release }) => {
+    const pending = views.get("pending-messages");
+    const rows = [...views].filter(([, view]) => view.parent === "pending-messages")
+      .map(([id, view]) => [id, view.props.text]);
+    const messages = withText(views, "same").filter(view => view.parent !== "pending-messages");
     const draft = views.get("draft")?.props;
-    if (step === 0 && draft?.sendable) {
+    const ids = rows.map(([id]) => id);
+    if (step === 0 && withText(views, warning).length) {
+      expect(pending?.props.hidden).toBe(true);
+      expect([...views.keys()].indexOf("pending-messages")).toBeLessThan([...views.keys()].indexOf("composer"));
+      expect(pending?.parent).toBe("dock");
       step++;
-      key(`\x1b[200~${clipboardDraft}\x1b[201~`);
-    } else if (step === 1 && draft?.text === clipboardDraft) {
+      event({ ev: "send", id: "draft", text: "Run fixture" });
+    } else if (step === 1 && withText(views, "Fixture turn started").length) {
+      key("firxt");
       step++;
-      const offer = "\x1b]5522;type=read:status=OK:pw=interrupted";
-      if (interrupted === "opening OK") {
-        key(offer);
-        // Attempt the first Send after the deadline even when no timeout notice arrives.
-        await Bun.sleep(3600);
-        step = 4;
-        key(clipboardSuffix);
-      } else key(offer + "\x1b\\");
-      event(submit);
-    } else if (step === 2 && hasDetail(views, "Wait for the paste to finish")) {
+    } else if (step === 2 && editStage === "replace" && draft?.text === "firxt") {
+      editStage = "undo";
+      event({ ev: "edit", id: "draft", len: 5, from: 3, to: 4, text: "s", cursor: 4 });
+    } else if (step === 2 && editStage === "undo" && draft?.text === "first") {
+      editStage = "redo";
+      key("\x1b[122;9u");
+    } else if (step === 2 && editStage === "redo" && draft?.text === "firxt") {
+      editStage = "done";
+      key("\x1b[122;10u\x1b[13;5u");
+    } else if (step === 2 && !sawAckWithoutRows && withText(views, "Fixture acknowledged").length) {
+      expect(rows).toEqual([]);
+      expect(pending?.props.hidden).toBe(true);
+      expect(draft?.text).toBe("");
+      sawAckWithoutRows = true;
+      release(checkpoint.acknowledged);
+    } else if (step === 2 && ids.length === 1) {
+      expect(rows).toEqual([["pending.q_1", "Queue: first"]]);
+      expect(pending?.props.hidden).toBe(false);
       step++;
-      key(partial);
-    } else if (step === 3 && hasDetail(views, "Tern did not complete the paste")) {
-      expect(draft?.text).toBe(clipboardDraft);
+      key("same\x1b[13;9u");
+    } else if (step === 3 && ids.length === 2) {
+      expect(rows).toEqual([["pending.q_1", "Queue: first"], ["pending.q_2", "Steering: same"]]);
       step++;
-      key(clipboardSuffix);
-      event(submit);
-    } else if (step === 4 && hasDetail(views, "Fixture turn started")) {
+      key("same\x1b[13;5u");
+    } else if (step === 4 && ids.length === 3) {
+      expect(rows[2]).toEqual(["pending.q_3", "Queue: same"]);
+      expect(messages).toHaveLength(0);
+      step++;
+      key("refused\x1b[13;9u" + "new draft");
+    } else if (step === 5 && hasDetail(views, "fixture queue refused")) {
+      expect(draft?.text).toBe("refused\nnew draft");
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 6 && draft?.sendable) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      expect(draft.text).toBe("refused\nnew draft");
+      step++;
+      release(checkpoint.stopped);
+    } else if (step === 7 && draft?.sendable === false && views.get("stop")?.props.hidden === false) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_2", "pending.q_3"]);
+      expect(messages).toHaveLength(0);
+      step++;
+      release(checkpoint.restarted);
+    } else if (step === 8 && messages.length) {
+      expect(ids).toEqual(["pending.q_1", "pending.q_3"]);
+      expect(messages).toHaveLength(1);
+      expect(draft?.text).toBe("refused\nnew draft");
+      step++;
+      event({ ev: "action", id: "stop", act: "stop" });
+    } else if (step === 9 && ids.length === 1) {
+      expect(ids).toEqual(["pending.q_3"]);
+      step++;
+      release(checkpoint.retained);
+    } else if (step === 10 && pending?.props.hidden) {
+      expect(rows).toEqual([]);
+      expect(messages).toHaveLength(1);
+      expect(draft?.text).toBe("refused\nnew draft");
       step++;
       return true;
     }
     return false;
-  }, "clipboard");
-  expect(step).toBe(5);
-}, 8000);
+  }, "queue");
+  expect(sawAckWithoutRows).toBe(true);
+  expect(step).toBe(11);
+});
