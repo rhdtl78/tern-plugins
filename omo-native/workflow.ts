@@ -6,7 +6,7 @@ import { add, node, record, string, type Op } from "./surface";
 import type { ChecklistPhase } from "./transcript";
 import type { ActivityView } from "./activity";
 import { displayStatus, short, unfinished, workflowLayers, workflowSteps, type Step } from "./workflow-projection";
-import { graph } from "./workflow-graph";
+import { formatNodeRuntime, graph } from "./workflow-graph";
 export { graph } from "./workflow-graph";
 
 const sheet = "workflow";
@@ -14,8 +14,6 @@ export const workflowGraphMinWidth = 380;
 type Run = { readonly id: string; readonly title: string; readonly status: string };
 type Section = "usage" | "plan" | "dag" | "activity";
 type Reader = Pick<OmoRpc, "request"> & Partial<Pick<OmoRpc, "sessionId">>;
-const runtime = (s: Step) => s.runtimeMs === undefined ? "" :
-  s.runtimeMs < 1000 ? `${s.runtimeMs}ms` : `${(s.runtimeMs / 1000).toFixed(1)}s`;
 
 export function supportsWorkflow(hello: RpcRecord): boolean {
   const kinds = hello.kinds;
@@ -258,7 +256,7 @@ export class Workflow {
     const listItem = (index: number) => {
       const step = this.#steps[index];
       return node(`workflow-step-${index}`, "button", {
-        text: [step.label, step.status, step.route?.name, runtime(step),
+        text: [step.label, step.status, step.route?.name, formatNodeRuntime(step.runtimeMs),
           step.needs.length && `depends on ${this.#predecessors(step)}`].filter(Boolean).join(" · "),
         on: step.id === this.#selectedStep, role: "workflow-step", variant: "quiet", actions: { click: "select-step" },
       });
@@ -360,8 +358,9 @@ export class Workflow {
     const step = this.#steps.find(s => s.id === this.#selectedStep);
     if (!step) return "";
     const r = step.route;
+    const runtime = formatNodeRuntime(step.runtimeMs);
     return [`${step.label} · ${step.status}`,
-      [runtime(step) && `Runtime: ${runtime(step)}`, step.attempt !== undefined && `Attempts: ${step.attempt}`].filter(Boolean).join(" · "),
+      [runtime && `Runtime: ${runtime}`, step.attempt !== undefined && `Attempts: ${step.attempt}`].filter(Boolean).join(" · "),
       r && `${r.kind === "agent" ? "Agent" : "Category"}: ${r.name}`, r?.model && `Configured model: ${r.model}`,
       step.reason && `Reason: ${step.reason}`].filter(Boolean).join("\n");
   }

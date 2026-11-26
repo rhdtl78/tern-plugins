@@ -111,6 +111,44 @@ test("a late duplicate or failed Todo cannot replace the latest cleared checklis
 const updated = (owner: string) => ({ type: "extension_event", name: "omo.dag.updated", data: { parent_session_id: owner } });
 const listed = (...runs: readonly RpcRecord[]) => ({ data: { ok: true, value: { runs } } });
 
+test("DAG node durations use whole seconds without changing the panel total", async () => {
+  const cases = [
+    [500, "0s"], [59999, "59s"], [60000, "1m 0s"], [65000, "1m 5s"],
+    [3599999, "59m 59s"], [3600000, "1h 0m 0s"], [3723000, "1h 2m 3s"], [undefined, ""],
+  ] as const;
+  const nodes = cases.map(([runtime_ms], i) => ({
+    id: `node-${i}`, state: "completed", runStats: runtime_ms === undefined ? undefined : { runtime_ms },
+  }));
+  const rendered = Promise.withResolvers<void>();
+  const frames: unknown[] = [];
+  const workflow = new Workflow((...ops) => {
+    frames.push(...ops);
+    if (ops.some(op => op[0] === "graph" && op[1])) rendered.resolve();
+  });
+  workflow.bind({ async request(_, fields) {
+    if (fields?.name === "omo.dag.list") return listed({ runId: "r", parentSessionId: "owner" });
+    return { data: { ok: true, value: { runId: "r", parentSessionId: "owner", nodes } } };
+  } }, "owner", "/tmp");
+  workflow.toggle();
+  await rendered.promise;
+
+  const states = cases.map(([, label]) => label ? `completed · ${label}` : "completed");
+  expect(frames).toContainEqual(["graph", expect.objectContaining({
+    cards: states.map(state => expect.objectContaining({ state })),
+  })]);
+  expect(JSON.stringify(frames)).toContain("Node time  185m 8s · 7/8 timed");
+  expect(workflowSteps(nodes).map(step => step.runtimeMs)).toEqual(cases.map(([ms]) => ms));
+  for (const [i, [, label]] of cases.entries()) {
+    workflow.action({ id: `workflow-step-${i}`, act: "select-step" });
+    expect(frames).toContainEqual(["set", `workflow-step-${i}`, expect.objectContaining({
+      text: `node-${i} · ${states[i]}`, on: true,
+    })]);
+    expect(frames).toContainEqual(["set", "workflow-node-detail", {
+      text: `node-${i} · completed${label ? `\nRuntime: ${label}` : ""}`, hidden: false,
+    }]);
+  }
+});
+
 test("direct neighbors share selection and update in place when the selected worker finishes", async () => {
   let terminal = false;
   const frames: unknown[] = [];
@@ -137,7 +175,7 @@ test("direct neighbors share selection and update in place when the selected wor
   terminal = true;
   workflow.event(updated("owner"));
   await Bun.sleep(0);
-  expect(detail()).toEqual(["set", "workflow-node-detail", { text: "next · completed\nRuntime: 4.5s · Attempts: 1\nAgent: reviewer\nConfigured model: explicit/config", hidden: false }]);
+  expect(detail()).toEqual(["set", "workflow-node-detail", { text: "next · completed\nRuntime: 4s · Attempts: 1\nAgent: reviewer\nConfigured model: explicit/config", hidden: false }]);
   expect(frames).toContainEqual(["set", "workflow-result", { text: "Actual result", hidden: false }]);
   expect(frames).toContainEqual(["set", "workflow-step-1", expect.objectContaining({ on: true })]);
   expect(JSON.stringify(frames)).not.toMatch(/secret|ignore|"del"/);
@@ -455,7 +493,7 @@ test("Boulder worktree prefers a registered copy and falls back only when absent
     if (await proc.exited !== 0) throw new Error(diagnostic);
   };
   try {
-    await git("clone", "--quiet", "--shared", "--", join(import.meta.dir, "../.."), root);
+    await git("clone", "--quiet", "--shared", "--", join(import.meta.dir, ".."), root);
     await git("-C", root, "worktree", "add", "--detach", sibling, "HEAD");
     const rel = ".omo/plans/active.md";
     await mkdir(join(root, ".omo/plans"), { recursive: true });
