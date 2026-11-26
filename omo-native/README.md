@@ -113,13 +113,13 @@ Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of
 
 ### Choose model settings
 
-When the session is idle, click the model name in the footer. Type part of a model name, provider, or model ID to filter the list. Use **↑** and **↓** to select a row. Press **Enter** or click **Use model** to apply it. You can also click a row to select it, then click the selected row to apply it.
+When the session is idle, open **Model settings** from the footer or press **Ctrl+S**. The button shows the session’s model, Thinking level, and any non-default speed. The picker opens on the current Thinking level and lists the levels the model supports.
 
-Use the next two footer controls to choose a **Service tier** or **Thinking** level. The tier picker shows switchable variants only when OmO's catalog identifies them as belonging to the current base model. Other variants remain selectable directly in the model picker. The Thinking picker lists the levels available for the active model.
+Click the **Model** row to browse models in the same picker. Type part of a model name, provider, or model ID to filter the list. Use **↑**, **↓**, or **Tab** to select a row, then press **Enter** to open it or apply a change. **Speed** appears only when OmO confirms switchable variants of the current model; the bolt marks Fast. Hover or click **Speed** to see the available tiers and the checked current tier, or press **Ctrl+S** again to enter Speed with the keyboard. **Back** returns to Thinking without applying a change. **Escape** or a click outside dismisses the picker.
 
 **Escape** or **Cancel** dismisses a picker. Changes affect the current session, not the device default, and leave your draft unsent and intact. The footer reflects OmO's session state, not just what you selected; a dash means OmO did not report a value. An engine without session-scoped model switching shows an error instead.
 
-When OmO reports current subscription quota for the account this session uses, a provider ring appears after the three settings. The ring shows the remaining share of the most depleted reported base window. Its tooltip gives the window and both percentages. The ring stays hidden when a matching, current report isn't available.
+When OmO reports current subscription quota for the account this session uses, a provider ring appears beside Model settings. The ring shows the remaining share of the most depleted reported base window. Its tooltip gives the window and both percentages. The ring stays hidden when a matching, current report isn't available.
 
 ## Reopen a saved session
 

@@ -12,7 +12,7 @@ type Row = {
 const labels = {
   models: ["Choose model", "Use model", "No available models"],
   tiers: ["Choose service tier", "Use tier", "No confirmed service tier choices for this model"],
-  thinking: ["Choose Thinking level", "Use level", "No supported Thinking levels for this model"],
+  settings: ["Model settings", "Select", "No supported Thinking levels for this model"],
   sessions: ["Resume session", "Resume", "No saved sessions for this project"],
   fork: ["Fork session", "Fork", "No user messages to fork from"],
   tree: ["Session tree", "Select branch", "No session entries"],
@@ -32,7 +32,7 @@ export async function selectedSession(target: SavedTarget, cwd: string) {
   return { fields: await verify(), verify };
 }
 
-type Effect = "draw" | "close" | "use" | "retry" | undefined;
+type Effect = "draw" | "close" | "use" | "retry" | "back" | undefined;
 export class Picker {
   state: "loading" | "ready" | "error" = "loading";
   message = "";
@@ -40,7 +40,7 @@ export class Picker {
   query = "";
   selected = "";
   rows: readonly Row[] = [];
-  constructor(readonly kind: keyof typeof labels, readonly id: string) {}
+  constructor(public kind: keyof typeof labels, readonly id: string) {}
 
   get visible() {
     const q = this.query.trim().toLowerCase();
@@ -48,6 +48,7 @@ export class Picker {
   }
   get choice() { return this.visible.find(row => row.id === this.selected); }
   get usable() { return this.state === "ready" && !!(this.kind === "rename" ? this.query.trim() : this.choice); }
+  protected get searchQuery(): string | null { return this.query; }
   load(rows: readonly Row[]) {
     this.rows = rows;
     this.state = "ready";
@@ -64,7 +65,7 @@ export class Picker {
     const [title, use, empty] = labels[this.kind];
     return {
       role: `omo.${this.kind}`, title, size: "md", preview: "none",
-      noun: this.kind, query: this.query, selected: this.selected, state: this.state, message: this.message,
+      noun: this.kind, query: this.searchQuery, selected: this.selected, state: this.state, message: this.message,
       empty,
       ...(catalog ? { items: this.rows.map(({ id, label, detail }) => ({ id, label, detail })),
         current: this.rows.filter(row => row.current).map(row => row.id) } : {}),
@@ -99,12 +100,16 @@ export class Picker {
       case "\x1b": case "\x1b[27u": case "\x03": return "close";
       case "\r": case "\x1b[13u": return this.usable ? "use" : undefined;
       case "\x1b[A": case "\x1b[B": {
-        const rows = this.visible, index = rows.findIndex(row => row.id === this.selected);
-        this.selected = rows[Math.max(0, Math.min(rows.length - 1, index + (i.value.endsWith("A") ? -1 : 1)))]?.id ?? "";
-        return "draw";
+        return this.step(i.value.endsWith("A") ? -1 : 1);
       }
       case "\b": case "\x7f": case "\x1b[127u": return this.filter([...this.query].slice(0, -1).join(""));
       default: if (/^[^\p{Cc}]$/u.test(i.value)) return this.filter(this.query + i.value);
     }
+  }
+  protected step(delta: number, wrap = false): Effect {
+    const rows = this.visible, index = rows.findIndex(row => row.id === this.selected), next = index + delta;
+    this.selected = rows[wrap && rows.length ? (next + rows.length) % rows.length
+      : Math.max(0, Math.min(rows.length - 1, next))]?.id ?? "";
+    return "draw";
   }
 }
