@@ -2,7 +2,78 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { SessionSettings } from "./model-settings";
+import type { RpcRecord } from "./rpc";
+import { SettingsPicker } from "./settings-picker";
 import { record, surface } from "./surface";
+
+test.each(["event first", "picker first", "picker rejected", "session closed"] as const)(
+  "dismissed model picker keeps session readback fenced: %s", async order => {
+    const old = { model: { id: "old", input: ["text", "image"] } };
+    const eventState = { model: { id: "event-model", input: ["text"] } };
+    const pickerState = { model: { id: "picker-model", input: ["text"] } };
+    const a = Promise.withResolvers<RpcRecord>(), b = Promise.withResolvers<RpcRecord>();
+    const reads = [a.promise, b.promise].values();
+    const published: unknown[] = [];
+    const settings = new SessionSettings(model => published.push(record(model).id));
+    settings.show(old);
+    const picker = new SettingsPicker("test");
+    const client = {
+      getState: () => reads.next().value ?? Promise.reject(new Error("Unexpected state read")),
+      getProtocolInfo: () => Promise.reject(new Error("Dismissed picker must not load options")),
+      request: () => Promise.reject(new Error("Dismissed picker must not load options")),
+    };
+    let live = true, draws = 0;
+    const event = settings.observed(client, {});
+    const reload = picker.reload({ settings, client, live: () => live, draw: () => { draws++; } });
+    expect(picker.menuInput({ kind: "key", value: "\x1b" })).toBe("close");
+    live = false;
+    if (order === "session closed") settings.invalidate();
+    if (order === "event first") {
+      a.resolve(eventState); await event;
+      b.resolve(pickerState); await reload;
+      expect(published).toEqual(["old", "event-model", "picker-model"]);
+    } else {
+      if (order === "picker rejected") b.reject(new Error("Picker read failed"));
+      else b.resolve(pickerState);
+      await reload;
+      a.resolve(eventState); await event;
+      expect(published).toEqual(order === "session closed" ? ["old"] :
+        ["old", order === "picker rejected" ? "event-model" : "picker-model"]);
+    }
+    expect(settings.input).toEqual(order === "session closed" ? ["text", "image"] : ["text"]);
+    expect(draws).toBe(1);
+  },
+);
+
+test("Model and Back preserve a failed state read until settings are reloaded", async () => {
+  const model = { id: "fixture", provider: "test", name: "Confirmed fixture model" };
+  let fail = true;
+  const picker = new SettingsPicker("test");
+  const load = {
+    settings: new SessionSettings(() => {}),
+    client: {
+      getState: async () => {
+        if (fail) throw new Error("Fixture state read failed");
+        return { model };
+      },
+      getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
+      request: async (type: string) => ({ data: type === "get_available_models" ? { models: [model] } : { levels: [] } }),
+    },
+    live: () => true, draw: () => {},
+  };
+  const action = (act: string) => picker.menuInput({ kind: "event", value: { id: "model", ev: "action", act } });
+  await picker.reload(load);
+  expect(action("models")).toBe("models");
+  expect(picker.props()).toMatchObject({ state: "error", message: "Fixture state read failed" });
+  picker.page("settings"); // Back callback; main.ts retries automatically on errors.
+  expect(action("reload")).toBe("retry");
+  fail = false;
+  await picker.reload(load);
+  expect(picker.menuProps().items).toContainEqual({ id: "models", label: model.name });
+  expect(action("models")).toBe("models");
+  expect(picker.props(true)).toMatchObject({ state: "ready", selected: "m0", current: ["m0"] });
+});
 
 const fixture = String.raw`
 import { appendFileSync } from "node:fs";
@@ -109,7 +180,7 @@ for (const { scenario, tier, outcome } of cases) {
       };
       const draft = "unsent fixture draft";
       let phase: "start" | "draft" | "attach" | "pick" | "confirm" | "reopen" | "back" | "cancel" | "done" = "start";
-      let draftText: unknown, modelTitle = "", reopened: unknown, actualOutcome: unknown;
+      let draftText: unknown, modelTitle = "", menuChecked: unknown, reopened: unknown, actualOutcome: unknown;
       const backMenus: { heading: unknown; checked: unknown[]; speed: unknown; thinking: unknown[] }[] = [];
       let attachmentId = "", attachmentHidden: unknown;
       let buffer = "";
@@ -176,7 +247,7 @@ for (const { scenario, tier, outcome } of cases) {
                   pickMenu(menuOption.id);
                   pickMenu(menuOption.id);
                 } else if (phase === "reopen" && menuOption) {
-                  reopened = { current: menuOption.checked ? [menuOption.id] : [], selected: menuOption.id, base: menuOption.id };
+                  menuChecked = menuOption.checked;
                   phase = "done";
                   send("\x04");
                 }
@@ -224,7 +295,8 @@ for (const { scenario, tier, outcome } of cases) {
         expect(calls.filter(call => call !== "read")).toEqual(["write"]);
         expect(draftText).toBe(draft);
         expect(actualOutcome).toBe(outcome);
-        if (!thinking && (outcome === "selected" || scenario === "reload")) {
+        if (!thinking && outcome === "selected") expect(menuChecked).toBe(true);
+        if (scenario === "reload") {
           const { current, selected, base } = record(reopened);
           expect(current).toEqual([base]);
           expect(selected).toBe(base);

@@ -109,8 +109,8 @@ test("only confirmed variants with a same-provider base move to the tier picker"
   const catalog = await modelCatalog(rpc, state);
   expect(catalog.models.map(row => row.label)).toEqual([base.id, solo.id]);
   expect(catalog.tiers).toEqual([]);
-  expect(appliedSettings(state)).toEqual({ model: base.id, tier: "ultrafast", thinking: "medium" });
-  expect(appliedSettings({ model: solo })).toEqual({ model: solo.id, tier: "", thinking: "" });
+  expect(appliedSettings(state)).toEqual({ model: base.id, name: state.model.id, tier: "ultrafast", thinking: "medium" });
+  expect(appliedSettings({ model: solo })).toEqual({ model: solo.id, name: solo.id, tier: "", thinking: "" });
   const [baseChoice, fastChoice] = (await modelCatalog(rpc, { model: base })).tiers;
   expect(baseChoice?.label).toBe("Standard");
   expect(fastChoice?.label).toBe("Fast");

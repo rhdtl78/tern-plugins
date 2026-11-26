@@ -22,7 +22,7 @@ export function appliedSettings(state: RpcRecord) {
   const suffix = /-(fast|ultrafast)$/.exec(id);
   const upstream = tier === "fast" || tier === "ultrafast" ? string(model.upstreamModelId) : "";
   const base = upstream && upstream !== id ? upstream : suffix && suffix[1] === tier ? id.slice(0, suffix.index) : "";
-  return { model: plain(base || name || id || "No model selected"),
+  return { model: plain(base || name || id || "No model selected"), name: plain(name || id),
     tier: plain(tier), thinking: plain(string(state.thinkingLevel)) };
 }
 
@@ -116,6 +116,15 @@ export const settingsCss = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sf-menu[data-id="model"] [data-act="models"] .sf-menu-label {
+  display: block;
+  /* Keep the model label and chevron inside Tern's default menu width. */
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sf-menu[data-id="model"] [data-act="models"]::after { content: "›"; }
 .sf-menu[data-id="model"] .sf-menu-subpop {
   width: max-content;
   min-width: 0;
@@ -134,10 +143,11 @@ export function settingsNode(quotaAvailable: boolean) {
   ]);
 }
 
-/** Owns the last readback and fences reads superseded by newer reads, local writes, or shutdown. */
+/** Owns confirmed session state independently of picker lifetime. */
 export class SessionSettings {
   #model: RpcRecord = {};
   #revision = 0;
+  #publishedRevision = 0;
   #applying = false;
 
   constructor(private readonly publish: (model: unknown, ops: Op[]) => void) {}
@@ -156,20 +166,27 @@ export class SessionSettings {
     }]]);
   }
 
-  invalidate() { this.#revision++; }
+  invalidate() { this.#publishedRevision = ++this.#revision; }
 
-  async read(client: OmoRpc, live = () => true) {
+  #accept(revision: number, state: RpcRecord) {
+    if (revision <= this.#publishedRevision) return;
+    this.#publishedRevision = revision;
+    this.show(state);
+  }
+
+  async read(client: Pick<OmoRpc, "getState">) {
     const revision = ++this.#revision;
     const state = await client.getState();
-    if (revision === this.#revision && live()) this.show(state);
+    // Starting a newer read does not invalidate a successful result.
+    this.#accept(revision, state);
     return state;
   }
 
-  async observed(client: OmoRpc, event: RpcRecord) {
+  async observed(client: Pick<OmoRpc, "getState">, event: RpcRecord) {
     const expected = this.#revision + 1;
     try { await this.read(client); }
     catch {
-      if (expected === this.#revision && string(record(event.model).id)) this.show(event);
+      if (expected === this.#revision && string(record(event.model).id)) this.#accept(expected, event);
     }
   }
 

@@ -9,7 +9,8 @@ const message = (error: unknown) => plain(error instanceof Error ? error.message
 
 /** Native menu at the root; searchable sheets for model choices and recovery. */
 export class SettingsPicker extends Picker {
-  #view = appliedSettings({});
+  #view: ReturnType<typeof appliedSettings> | undefined;
+  #stateError = "";
   #catalog: Catalog | undefined;
   #catalogError = "";
   #thinkingError = "";
@@ -26,12 +27,12 @@ export class SettingsPicker extends Picker {
   menuProps() {
     const row = ({ id, label, current }: Catalog["tiers"][number]) => ({ id, label, checked: !!current });
     return { open: true, active: this.#active, items: [
-      { header: this.state === "loading" ? "Loading settings…" : `Thinking: ${this.#view.thinking || "Not reported"}` },
+      { header: this.state === "loading" ? "Loading settings…" : `Thinking: ${this.#view?.thinking || "Not reported"}` },
       ...(this.#thinkingError ? [{ header: "Thinking options unavailable" }] : []),
       ...(this.state === "error" && this.kind === "settings" ? [{ id: "reload", label: "Reload", detail: this.message }] : []),
       ...this.#thinking.map(row),
-      { id: "models", label: "Model ›" },
-      ...(this.#speed.length ? [{ id: "speed", label: "Speed", icon: this.#view.tier === "fast" ? "bolt" : "",
+      { id: "models", label: this.#view?.name || "Model" },
+      ...(this.#speed.length ? [{ id: "speed", label: "Speed", icon: this.#view?.tier === "fast" ? "bolt" : "",
         items: this.#speed.map(row) }] : []),
     ] };
   }
@@ -82,7 +83,7 @@ export class SettingsPicker extends Picker {
 
   override props(catalog = false) {
     const props = super.props(catalog);
-    const { thinking } = this.#view;
+    const thinking = this.#view?.thinking;
     return {
       ...props,
       title: this.kind === "settings" ? `Thinking: ${thinking || "Not reported"}` : this.kind === "tiers" ? "Speed" : props.title,
@@ -114,6 +115,11 @@ export class SettingsPicker extends Picker {
     if (this.kind !== kind) this.query = "";
     this.kind = kind;
     this.message = "";
+    if (!this.#view) {
+      this.state = this.#stateError ? "error" : "loading";
+      this.message = this.#stateError;
+      return;
+    }
     if (kind === "settings") {
       this.load(this.#thinking);
       return;
@@ -126,23 +132,25 @@ export class SettingsPicker extends Picker {
   }
 
   async reload({ settings, client, live, draw }: {
-    settings: SessionSettings; client: OmoRpc; live: () => boolean; draw: () => void;
+    settings: SessionSettings; client: Pick<OmoRpc, "getState" | "getProtocolInfo" | "request">; live: () => boolean; draw: () => void;
   }) {
     const revision = ++this.#revision;
     const current = () => live() && revision === this.#revision;
-    this.#view = appliedSettings({});
+    this.#view = undefined;
     this.#catalog = undefined;
-    this.#catalogError = this.#thinkingError = "";
+    this.#stateError = this.#catalogError = this.#thinkingError = "";
     this.#thinking = [];
     this.#active = "";
     this.load([]);
-    this.state = "loading"; this.message = "";
+    this.page(this.kind === "models" || this.kind === "tiers" ? this.kind : "settings");
     draw();
     let state: RpcRecord;
-    try { state = await settings.read(client, current); }
+    try { state = await settings.read(client); }
     catch (error) {
       if (current()) {
-        this.state = "error"; this.message = message(error); draw();
+        this.#stateError = message(error) || "Could not load session settings";
+        this.page(this.kind === "models" || this.kind === "tiers" ? this.kind : "settings");
+        draw();
       }
       return;
     }
