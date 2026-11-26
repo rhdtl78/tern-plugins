@@ -87,7 +87,7 @@ export class Editor {
       this.#replace(from, to, text, cursor);
     } else if (input.kind === "paste") {
       this.#replace(this.cursor, this.cursor, plain(input.value));
-    } else {
+    } else if (input.kind === "key") {
       // Tern owns selection, clipboard and IME. Unselected terminal keys can
       // still reach us alongside the editor's addressed replacement events.
       if (input.value === "\x1b[A" || input.value === "\x1b[B") {
@@ -127,7 +127,7 @@ export class Editor {
           this.#replace(this.cursor, this.cursor, input.value);
       }
       this.#column = undefined;
-    }
+    } else return;
     return "edit";
   }
 }

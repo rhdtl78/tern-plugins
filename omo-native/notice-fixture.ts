@@ -2,7 +2,8 @@ export const model = "Fixture model";
 export const warning = "Hot-reloaded: fixture/omo.jsonc";
 export const refusal = "fixture refused startup";
 
-export type Scenario = "notice" | "composer" | "queue";
+export type Scenario = "notice" | "composer" | "queue" | "clipboard";
+export const promptsFile = "prompts.jsonl";
 export const checkpoint = {
   acknowledged: "acknowledged",
   stopped: "stopped",
@@ -13,7 +14,7 @@ export type Checkpoint = typeof checkpoint[keyof typeof checkpoint];
 
 export function noticeEngine(rejectOpen: boolean, scenario: Scenario) {
   return `#!/usr/bin/env bun
-import { existsSync, unwatchFile, watchFile } from "node:fs";
+import { appendFileSync, existsSync, unwatchFile, watchFile } from "node:fs";
 import { createInterface } from "node:readline";
 const sessionId = "notice-test";
 const send = value => console.log(JSON.stringify({ sessionId, ...value }));
@@ -71,6 +72,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (++prompts !== 1 || fields.message !== "Run fixture" ||
         Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
   }
+  if (${scenario === "clipboard"} && type === "prompt") appendFileSync(${JSON.stringify(promptsFile)}, JSON.stringify(fields.message) + "\\n");
   if (type === "abort" && (composer || queue) &&
       (fields.awaitIdle !== true || fields.intent !== "stop" || fields.clearQueue !== undefined ||
         (composer && ++stopCalls !== 1))) process.exit(9);

@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { checkpoint, model, noticeEngine, refusal, warning, type Checkpoint, type Scenario } from "./notice-fixture";
+import { checkpoint, model, noticeEngine, promptsFile, refusal, warning, type Checkpoint, type Scenario } from "./notice-fixture";
 import { record, string, surface } from "./surface";
 
 type View = {
@@ -14,6 +14,8 @@ type View = {
 type Views = ReadonlyMap<string, View>;
 const opening = "Opening session…", working = "Working…", stopping = "Stopping…";
 const exit = "RPC exited (7)";
+const clipboardDraft = "Synthetic draft to keep";
+const clipboardSuffix = " plus new text";
 
 function apply(views: Map<string, View>, ops: unknown[]) {
   function add(parent: string, value: unknown) {
@@ -46,40 +48,49 @@ type FixtureControls = {
   readonly release: (marker: Checkpoint) => void;
 };
 
-async function exercise(rejectOpen: boolean, observe: (views: Views, controls: FixtureControls) => boolean,
+async function exercise(rejectOpen: boolean, observe: (views: Views, controls: FixtureControls, ops: unknown[]) => boolean,
   scenario: Scenario = "notice") {
   const cwd = await mkdtemp(join(tmpdir(), "omo-notice-"));
   try {
-    const preload = join(cwd, "tty.ts");
-    await writeFile(preload, "process.stdin.isTTY = process.stdout.isTTY = true; process.stdin.setRawMode = () => process.stdin;");
+    const promptsPath = join(cwd, promptsFile);
+    if (scenario === "clipboard") await writeFile(promptsPath, "");
     await writeFile(join(cwd, "omo"), noticeEngine(rejectOpen, scenario), { mode: 0o700 });
-    const child = Bun.spawn([process.execPath, "--preload", preload, join(import.meta.dir, "main.ts")], {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const output = writable.getWriter();
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "main.ts")], {
       cwd, env: { ...process.env, PATH: `${cwd}:${dirname(process.execPath)}:/usr/bin:/bin` },
-      stdin: "pipe", stdout: "pipe", stderr: "inherit", timeout: 3500,
+      terminal: { data: (_terminal, bytes) => { void output.write(bytes.slice()); } },
+      onExit: () => { void output.close(); },
+      timeout: scenario === "clipboard" ? 6000 : 3500,
     });
     const views = new Map<string, View>();
-    const send = (value: string) => { child.stdin.write(value); child.stdin.flush(); };
+    const send = (value: string) => { child.terminal?.write(value); };
     const event = (value: object) => send(`\x1b_tsp;e;${JSON.stringify({ sf: surface, ...value })}\x1b\\`);
     const release = (marker: Checkpoint) => writeFileSync(join(cwd, marker), "", { flag: "wx" });
     const controls = { event, key: send, release };
     try {
-      send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
       let buffer = "";
-      for await (const chunk of child.stdout.pipeThrough(new TextDecoderStream())) {
+      for await (const chunk of readable.pipeThrough(new TextDecoderStream())) {
         buffer += chunk;
         let end: number;
         while ((end = buffer.indexOf("\x1b\\")) !== -1) {
-          const packet = buffer.slice(0, end).split("\x1b_tsp;f;")[1];
+          const message = buffer.slice(0, end);
+          const packet = message.split("\x1b_tsp;f;")[1];
+          if (message.includes("\x1b_tsp;q;")) send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
           buffer = buffer.slice(end + 2);
           if (!packet) continue;
           const { ops } = record(JSON.parse(packet));
           if (!Array.isArray(ops)) continue;
           apply(views, ops);
-          if (observe(views, controls)) send("\x04");
+          if (observe(views, controls, ops)) send("\x04");
         }
       }
-      expect(await child.exited).toBe(0);
-    } finally { child.kill(); await child.exited; }
+      const code = await child.exited;
+      if (scenario === "clipboard") {
+        expect(await readFile(promptsPath, "utf8")).toBe(JSON.stringify(clipboardDraft + clipboardSuffix) + "\n");
+      }
+      expect(code).toBe(0);
+    } finally { child.kill(); await child.exited; child.terminal?.close(); }
   } finally { await rm(cwd, { recursive: true, force: true }); }
 }
 
@@ -181,8 +192,65 @@ test("rejected steer restores both drafts and repeated Escape cannot stop twice 
   expect(step).toBe(4);
 });
 
+test.each([
+  ["opening OK", ""],
+  ["established DATA", "\x1b]5522;type=read:status=DATA:pw=interrupted:mime=Lg==;dGV4dA=="],
+  ["established prefix before semicolon", "\x1b]5522"],
+] as const)(
+  "the first Send includes new typing after interrupted clipboard %s expires", async (interrupted, partial) => {
+  let phase: "ready" | "pasted" | "offer" | "interrupted" | "sent" | "done" = "ready";
+  let firstSend: ReturnType<typeof setTimeout> | undefined;
+  let notices = 0;
+  const submit = { ev: "action", id: "send", act: "submit" };
+  try {
+    await exercise(false, (views, { event, key }, ops) => {
+      const draft = views.get("draft")?.props;
+      const interrupt = (bytes: string) => {
+        phase = "interrupted";
+        key(bytes);
+        // Allow both deadlines to elapse, even if there is no notice on the broken build.
+        firstSend = setTimeout(() => {
+          phase = "sent";
+          key(clipboardSuffix);
+          event(submit);
+        }, 3600);
+      };
+      if (phase === "ready" && draft?.sendable) {
+        phase = "pasted";
+        key(`\x1b[200~${clipboardDraft}\x1b[201~`);
+      } else if (phase === "pasted" && draft?.text === clipboardDraft) {
+        const offer = "\x1b]5522;type=read:status=OK:pw=interrupted";
+        if (interrupted === "opening OK") interrupt(offer);
+        else {
+          phase = "offer";
+          key(offer + "\x1b\\");
+          event(submit);
+        }
+      } else if (phase === "offer" && hasDetail(views, "Wait for the paste to finish")) {
+        interrupt(partial);
+      } else if (phase === "interrupted") {
+        // Count reports while idle; the suffix's per-key redraws re-emit the same label.
+        for (const op of ops) {
+          if (!Array.isArray(op) || op[0] !== "set" || op[1] !== "attachment-error") continue;
+          const { text, hidden } = record(op[2]);
+          if (text !== "Tern did not complete the paste." || hidden !== false) continue;
+          expect(draft?.text).toBe(clipboardDraft);
+          notices++;
+        }
+      } else if (phase === "sent" && hasDetail(views, "Fixture turn started")) {
+        phase = "done";
+        return true;
+      }
+      return false;
+    }, "clipboard");
+  } finally { clearTimeout(firstSend); }
+  expect(phase).toBe("done");
+  expect(notices).toBe(1);
+}, 8000);
+
 test("projects the engine's steering and follow-up queue above the composer", async () => {
   let step = 0, sawAckWithoutRows = false;
+  let editStage: "replace" | "undo" | "redo" | "done" = "replace";
   await exercise(false, (views, { event, key, release }) => {
     const pending = views.get("pending-messages");
     const rows = [...views].filter(([, view]) => view.parent === "pending-messages")
@@ -197,8 +265,17 @@ test("projects the engine's steering and follow-up queue above the composer", as
       step++;
       event({ ev: "send", id: "draft", text: "Run fixture" });
     } else if (step === 1 && withText(views, "Fixture turn started").length) {
+      key("firxt");
       step++;
-      key("first\x1b[13;5u");
+    } else if (step === 2 && editStage === "replace" && draft?.text === "firxt") {
+      editStage = "undo";
+      event({ ev: "edit", id: "draft", len: 5, from: 3, to: 4, text: "s", cursor: 4 });
+    } else if (step === 2 && editStage === "undo" && draft?.text === "first") {
+      editStage = "redo";
+      key("\x1b[122;9u");
+    } else if (step === 2 && editStage === "redo" && draft?.text === "firxt") {
+      editStage = "done";
+      key("\x1b[122;10u\x1b[13;5u");
     } else if (step === 2 && !sawAckWithoutRows && withText(views, "Fixture acknowledged").length) {
       expect(rows).toEqual([]);
       expect(pending?.props.hidden).toBe(true);

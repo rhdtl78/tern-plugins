@@ -49,18 +49,61 @@ export class Surface {
   }
 }
 
-export type Input = { kind: "event"; value: RpcRecord } | { kind: "key" | "paste"; value: string };
+export type Input = { kind: "event"; value: RpcRecord } |
+  { kind: "clipboard"; value: string } | { kind: "key" | "paste"; value: string };
+const clipboardPrefix = "\x1b]5522;";
+
 // PTY reads do not preserve message boundaries. Never parse pasted bytes as
 // terminal replies or commands, even when the paste contains literal APCs.
 export class InputStream {
   #buffer = "";
+  #discardOsc: "clipboard" | "other" | undefined;
+  #clipboardTimer: ReturnType<typeof setTimeout> | undefined;
+  constructor(private readonly onClipboardTimeout?: () => void) {}
+
+  expireClipboardFrame(owner?: "transfer") {
+    this.#clearClipboardTimer();
+    const b = this.#buffer;
+    const transferPrefix = owner === "transfer" && b.startsWith("\x1b]") && clipboardPrefix.startsWith(b);
+    if (this.#discardOsc === "clipboard" || (!this.#discardOsc && (b.startsWith(clipboardPrefix) || transferPrefix))) {
+      this.#buffer = "";
+      this.#discardOsc = undefined;
+    }
+  }
+
+  #clearClipboardTimer() {
+    clearTimeout(this.#clipboardTimer);
+    this.#clipboardTimer = undefined;
+  }
+
   feed(chunk: string, escapeTimeout = false): Input[] {
     this.#buffer += chunk;
     const events: Input[] = [];
     while (this.#buffer) {
       const b = this.#buffer;
       let size: number;
-      if (b.startsWith("\x1b[200~")) {
+      if (this.#discardOsc || b.startsWith("\x1b]")) {
+        const offset = this.#discardOsc ? 0 : 2;
+        const end = /\x07|\x1b\\/.exec(b.slice(offset));
+        const clipboard = this.#discardOsc ? this.#discardOsc === "clipboard" : b.startsWith(clipboardPrefix);
+        if (!end) {
+          if (clipboard) this.#clipboardTimer ??= setTimeout(() => {
+            this.expireClipboardFrame();
+            this.onClipboardTimeout?.();
+          }, 3000).unref();
+          if (b.length > 16_384 || this.#discardOsc) {
+            this.#discardOsc ??= clipboard ? "clipboard" : "other";
+            this.#buffer = b.endsWith("\x1b") ? "\x1b" : "";
+          }
+          break;
+        }
+        this.#clearClipboardTimer();
+        if (!this.#discardOsc && clipboard)
+          events.push({ kind: "clipboard", value: end.index <= 16_384 ? b.slice(clipboardPrefix.length, offset + end.index) : "" });
+        else if (this.#discardOsc) events.push({ kind: "clipboard", value: "" });
+        this.#discardOsc = undefined;
+        size = offset + end.index + end[0].length;
+      } else if (b.startsWith("\x1b[200~")) {
         const end = b.indexOf("\x1b[201~", 6);
         if (end < 0) break;
         events.push({ kind: "paste", value: b.slice(6, end).replace(/\r\n?/g, "\n") });

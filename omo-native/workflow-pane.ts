@@ -145,7 +145,7 @@ export function workflowCompanion(path: string, token: string, chat: string, win
   let menuOpen = false;
   const timeout = setTimeout(stop, 4000);
   function stop() {
-    clearTimeout(timeout); clearTimeout(escape);
+    clearTimeout(timeout); clearTimeout(escape); input.expireClipboardFrame();
     socket?.destroy(); process.stdin.pause(); process.stdin.setRawMode(false);
     screen.send("x", { id: surface, keep: false });
     process.exit(0);
