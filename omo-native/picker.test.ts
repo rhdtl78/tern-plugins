@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeF
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Picker, savedRows, selectedSession } from "./picker";
-import { appliedSettings, changeSetting, modelChoices, settingApplied, thinkingChoices } from "./model-settings";
+import { appliedSettings, changeSetting, modelCatalog, settingApplied, thinkingChoices } from "./model-settings";
 import { entryRows, sessionCommand } from "./session-commands";
 import type { RpcRecord } from "./rpc";
 import { record } from "./surface";
@@ -74,7 +74,7 @@ test("duplicate display names switch by the selected registry pair, never the de
     },
   };
   const p = new Picker("models", "sheet");
-  p.load(await modelChoices(rpc, { model: first }, "models"));
+  p.load((await modelCatalog(rpc, { model: first })).models);
   expect(p.props(true).current).toEqual([p.selected]);
   p.input({ kind: "paste", value: "TWO/BETA" });
   expect(p.props().order).toHaveLength(1);
@@ -93,7 +93,7 @@ test("an old engine cannot offer a model switch that would change the default", 
     getProtocolInfo: async () => ({ data: { capabilities: ["models"] } }),
     request: async (cmd: string) => { calls.push(cmd); return {}; },
   };
-  await expect(modelChoices(rpc, {}, "models")).rejects.toThrow("only this session");
+  await expect(modelCatalog(rpc, {})).rejects.toThrow("only this session");
   expect(calls).toEqual([]);
 });
 
@@ -106,17 +106,18 @@ test("only confirmed variants with a same-provider base move to the tier picker"
     getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
     request: async () => ({ data: { models: [base, fast, solo] } }),
   };
-  expect((await modelChoices(rpc, state, "models")).map(row => row.label)).toEqual([base.id, solo.id]);
-  expect(await modelChoices(rpc, state, "tiers")).toEqual([]);
+  const catalog = await modelCatalog(rpc, state);
+  expect(catalog.models.map(row => row.label)).toEqual([base.id, solo.id]);
+  expect(catalog.tiers).toEqual([]);
   expect(appliedSettings(state)).toEqual({ model: base.id, tier: "ultrafast", thinking: "medium" });
   expect(appliedSettings({ model: solo })).toEqual({ model: solo.id, tier: "", thinking: "" });
-  const [baseChoice, fastChoice] = await modelChoices(rpc, { model: base }, "tiers");
-  expect(baseChoice?.label).toBe("Base model");
-  expect(fastChoice?.label).toBe("fast");
+  const [baseChoice, fastChoice] = (await modelCatalog(rpc, { model: base })).tiers;
+  expect(baseChoice?.label).toBe("Standard");
+  expect(fastChoice?.label).toBe("Fast");
   if (!fastChoice || !("provider" in fastChoice.target)) throw new Error("Missing fast tier");
   expect(settingApplied({ model: fast }, fastChoice.target)).toBe(false);
   expect(settingApplied({ model: fast, serviceTier: "priority" }, fastChoice.target)).toBe(true);
-  expect((await modelChoices(rpc, { model: fast }, "models")).find(row => row.current)?.target)
+  expect((await modelCatalog(rpc, { model: fast })).models.find(row => row.current)?.target)
     .toEqual({ provider: fast.provider, modelId: fast.id });
 });
 

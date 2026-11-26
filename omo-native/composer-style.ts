@@ -81,16 +81,6 @@ export const composerCss = `
       /* A wrapped line can contain the spacer, directory, and action. */
       max-width: calc(100% - var(--omo-footer-action-size) - 2 * var(--omo-composer-row-gap));
     }
-    .sf-row[data-id="footer"] > .sf-button[data-id="model"] {
-      border: 1px solid var(--l3);
-      border-radius: 999px;
-      min-width: 0;
-    }
-    .sf-row[data-id="footer"] > .sf-button[data-id="model"] .sf-btn-label {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
     .sf-row[data-id="footer"] > .sf-button:is([data-id="send"], [data-id="stop"]) {
       background: var(--t1);
       color: var(--raise);

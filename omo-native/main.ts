@@ -11,7 +11,8 @@ import { resumeFields, sessionActivity } from "./session";
 import { entryRows, sessionCommand } from "./session-commands";
 import { listSavedSessions } from "./history";
 import { Picker, savedRows, selectedSession } from "./picker";
-import { SessionSettings, settingAction, settingsCss, settingsDisabled, settingsNode } from "./model-settings";
+import { modelSettingsKey, SessionSettings, settingsCss, settingsNode } from "./model-settings";
+import { SettingsPicker } from "./settings-picker";
 import { supportsWorkflow, Workflow } from "./workflow";
 import { launchWorkflowPane, workflowCompanion } from "./workflow-pane";
 import { ActivityProjection } from "./activity";
@@ -124,7 +125,8 @@ function refresh() {
     ["set", "attachments", { hidden: !!ask || !attachments.size }],
     ["set", "attachment-error", { hidden: !!ask || !reason, text: reason ?? "" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
-    ...settingsDisabled(!canSend), ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
+    ["set", "model", { disabled: !canSend && !(picker instanceof SettingsPicker && picker.menuOpen) }],
+    ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
     ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
     ["set", "session-ulw", { hidden: border !== "ulw-running" }],
@@ -235,7 +237,7 @@ function onRpc(e: RpcRecord) {
   void quota?.event(e);
   if (ready && rpc && !settings.applying &&
       (e.type === "model_changed" || e.type === "thinking_level_changed" || e.type === "service_tier_changed")) {
-    if (picker && (picker.kind === "models" || picker.kind === "tiers" || picker.kind === "thinking")) {
+    if (picker instanceof SettingsPicker) {
       removePicker(); refresh();
     }
     void settings.observed(rpc, e);
@@ -416,17 +418,31 @@ async function restoreAfterChange(client: OmoRpc, text: string, replaced: boolea
 }
 function removePicker() {
   if (!picker) return;
-  frame(["del", picker.id], ["focus", ready ? "draft" : null]);
+  frame(picker instanceof SettingsPicker && picker.menuOpen
+    ? ["set", "model", { open: false, active: "", items: [] }] : ["del", picker.id],
+    ["focus", ready ? "draft" : null]);
   picker = undefined; cancelPaste();
 }
 function openPicker(kind: Picker["kind"]) {
   if (picker || ask || (kind !== "sessions" && (!ready || busy || submitting || stopping || settings.applying))) return;
-  const p = picker = new Picker(kind, `pick${++seq}`);
+  const id = `pick${++seq}`;
+  const p = picker = kind === "settings" ? new SettingsPicker(id) : new Picker(kind, id);
   cancelPaste();
-  frame(add("layer", node(p.id, "picker", p.props(true))), ["focus", null]);
+  if (p instanceof SettingsPicker) frame(["set", "model", p.menuProps()], ["focus", null]);
+  else frame(add("layer", node(p.id, "picker", p.props(true))), ["focus", null]);
   refresh(); void loadPicker(p);
 }
+function settingsSheet(p: SettingsPicker) {
+  p.menuOpen = false;
+  frame(["set", "model", { open: false, active: "", items: [] }],
+    add("layer", node(p.id, "picker", p.props(true))));
+  refresh();
+}
 async function loadPicker(p: Picker) {
+  if (p instanceof SettingsPicker && rpc)
+    return p.reload({ settings, client: rpc, live: () => picker === p && !closing,
+      draw: () => p.menuOpen ? frame(["set", "model", { disabled: false, ...p.menuProps() }])
+        : frame(["set", p.id, p.props(true)]) });
   p.state = "loading"; p.message = "";
   frame(["set", p.id, p.props()]);
   try {
@@ -437,9 +453,6 @@ async function loadPicker(p: Picker) {
       switch (kind) {
         case "fork": case "tree":
           p.load(entryRows(kind, (await rpc.request(kind === "fork" ? "get_fork_messages" : "get_tree")).data));
-          break;
-        case "models": case "tiers": case "thinking":
-          p.load(await settings.choices(rpc, kind));
           break;
       }
     }
@@ -452,6 +465,10 @@ async function choose(p: Picker) {
   const client = rpc;
   if (ready ? !client || busy || submitting || stopping || ask || settings.applying : p.kind !== "sessions") {
     removePicker(); refresh(); return;
+  }
+  if (p instanceof SettingsPicker && p.menuOpen) {
+    if (p.choice?.current) { removePicker(); refresh(); return; }
+    settingsSheet(p);
   }
   p.applying = true; p.state = "loading";
   frame(["set", p.id, p.props()]);
@@ -479,7 +496,7 @@ async function choose(p: Picker) {
       const reply = record((await client.request(fork ? "fork" : "navigate_tree", target)).data);
       if (reply.cancelled !== true && reply.outcome !== "cancelled")
         await restoreAfterChange(client, string(fork ? reply.text : reply.editorText), fork);
-    } else if (target) {
+    } else if (target && !p.choice?.current) {
       await settings.apply(client, target);
     }
     if (closing || !ready) return;
@@ -492,10 +509,32 @@ async function choose(p: Picker) {
   }
 }
 function pickerInput(p: Picker, i: Input) {
-  switch (p.input(i)) {
+  if (p instanceof SettingsPicker && p.menuOpen) {
+    switch (p.menuInput(i)) {
+      case "draw": frame(["set", "model", p.menuProps()]); break;
+      case "models": settingsSheet(p); break;
+      case "retry": settingsSheet(p); void loadPicker(p); break;
+      case "use": void choose(p); break;
+      case "close": removePicker(); refresh(); break;
+    }
+    return;
+  }
+  const effect = p.input(i);
+  switch (effect) {
     case "use": void choose(p); break;
     case "draw": frame(["set", p.id, p.props()]); break;
     case "retry": void loadPicker(p); break;
+    case "back":
+      if (p instanceof SettingsPicker) {
+        const reload = p.state === "error";
+        p.page("settings"); p.menuOpen = true;
+        if (reload) {
+          frame(["del", p.id]);
+          void loadPicker(p);
+        } else frame(["del", p.id], ["set", "model", { disabled: false, ...p.menuProps() }]);
+        refresh();
+      }
+      break;
     case "close":
       removePicker();
       if (p.kind === "sessions" && !ready) void close(); else refresh();
@@ -681,7 +720,10 @@ function handle(i: Input) {
     }
     if (picker) { pickerInput(picker, i); return; }
     switch (e.ev) {
-      case "toggle": transcript.fold(string(e.id), e.collapsed === true); return;
+      case "toggle":
+        if (e.id === "model" && e.open === true) openPicker("settings");
+        else transcript.fold(string(e.id), e.collapsed === true);
+        return;
       case "focus": if (e.id === "draft") frame(["focus", "draft"]); return;
       case "send":
         if (e.id === "draft" && !ask) {
@@ -697,8 +739,6 @@ function handle(i: Input) {
         }
         if (e.act === "insert-command" && typeof e.id === "string") { insertCommand(e.id); return; }
         if (e.id === "workflow-toggle" && e.act === "workflow") { toggleWorkflow(); return; }
-        const kind = settingAction(e);
-        if (kind) { openPicker(kind); return; }
         if (e.id === "stop" && e.act === "stop") void stop();
         if (e.id === "send" && e.act === "submit") void submit("prompt");
         if (ask && e.act === "choose") {
@@ -709,6 +749,7 @@ function handle(i: Input) {
     }
   }
   if (picker) { pickerInput(picker, i); return; }
+  if (i.kind === "key" && modelSettingsKey(i.value)) { openPicker("settings"); return; }
   if (i.kind === "key" && (i.value === "\x07" || i.value === "\x1b[103;5u")) { toggleWorkflow(); return; }
   if (!live || !ready) return;
   if (i.kind === "key" && slash.choice) {

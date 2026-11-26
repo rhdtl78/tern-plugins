@@ -8,7 +8,6 @@ class ModelSettingsError extends Error {
 
 type Model = { readonly provider: string; readonly modelId: string };
 export type Setting = (Model & { readonly tier?: string }) | { readonly level: string };
-export type SettingKind = "models" | "tiers" | "thinking";
 type SettingRow = {
   readonly id: string; readonly label: string; readonly detail: string; readonly current?: boolean;
   readonly target: Setting;
@@ -31,7 +30,7 @@ function sameModel(a: RpcRecord, b: RpcRecord) {
   return !!a.id && a.id === b.id && a.provider === b.provider;
 }
 
-export async function modelChoices(rpc: Pick<OmoRpc, "request" | "getProtocolInfo">, state: RpcRecord, kind: "models" | "tiers"): Promise<SettingRow[]> {
+export async function modelCatalog(rpc: Pick<OmoRpc, "request" | "getProtocolInfo">, state: RpcRecord) {
   const { capabilities } = record((await rpc.getProtocolInfo()).data);
   if (!Array.isArray(capabilities) || !capabilities.includes("session_model_scope"))
     throw new ModelSettingsError("This OmO engine cannot switch models for only this session. Update OmO to use this picker.");
@@ -54,22 +53,24 @@ export async function modelChoices(rpc: Pick<OmoRpc, "request" | "getProtocolInf
   const current = record(state.model);
   const listed = byKey.get(JSON.stringify([current.provider, current.id]));
   const base = listed && baseOf(listed);
-  if (kind === "tiers" && (!base || catalog.filter(m => baseOf(m) === base).length < 2)) return [];
-  return catalog.flatMap<SettingRow>((m, i) => {
+  const modelsRows: SettingRow[] = [], tiers: SettingRow[] = [];
+  for (const [i, m] of catalog.entries()) {
     const provider = string(m.provider), modelId = string(m.id), group = baseOf(m);
     const tier = tierLabel(m.serviceTier);
-    if (kind === "tiers") {
-      if (!base || group !== base) return [];
-      return [{ id: `t${i}`, label: plain(tier || "Base model"), detail: plain(`${provider}/${modelId}`),
+    if (base && group === base) {
+      tiers.push({ id: `t${i}`, label: tier && !["auto", "default"].includes(tier)
+        ? plain(tier.charAt(0).toUpperCase() + tier.slice(1)) : "Standard",
+        detail: plain(`${provider}/${modelId}`),
         current: settingApplied(state, { provider, modelId, tier }),
-        target: { provider, modelId, tier } }];
+        target: { provider, modelId, tier } });
     }
-    if (group !== m) return [];
-    return [{ id: `m${i}`, label: plain(string(m.name) || modelId), detail: plain(`${provider}/${modelId}`),
+    if (group !== m) continue;
+    modelsRows.push({ id: `m${i}`, label: plain(string(m.name) || modelId), detail: plain(`${provider}/${modelId}`),
       current: sameModel(m, base ?? current),
       target: sameModel(m, base ?? current) && listed
-        ? { provider, modelId: string(listed.id) } : { provider, modelId } }];
-  });
+        ? { provider, modelId: string(listed.id) } : { provider, modelId } });
+  }
+  return { models: modelsRows, tiers: tiers.length > 1 ? tiers : [] };
 }
 
 export async function thinkingChoices(rpc: Pick<OmoRpc, "request">, state: RpcRecord): Promise<SettingRow[]> {
@@ -100,45 +101,37 @@ export function settingApplied(state: RpcRecord, target: Setting) {
     || (target.tier === "" && (effectiveTier === "auto" || effectiveTier === "default"));
 }
 
-const controls = [
-  ["model", "models", "Model"],
-  ["tier", "tiers", "Service tier"],
-  ["thinking", "thinking", "Thinking"],
-] as const;
-
 export const settingsCss = `
 .sf-col[data-id="composer"] > .sf-row[data-id="footer"] { flex-wrap: wrap; }
-.sf-row[data-id="model-settings"] { flex: 0 1 auto; min-width: 0; max-width: 100%; gap: 4px; }
-.sf-row[data-id="model-settings"] > .sf-button {
-  border: 1px solid var(--l3);
+.sf-row[data-id="model-settings"] { flex: 0 1 auto; min-width: 0; max-width: 100%; gap: var(--omo-composer-row-gap); }
+.sf-menu[data-id="model"] { flex: 0 1 auto; min-width: 0; }
+.sf-menu[data-id="model"] .sf-menu-trigger {
+  border: var(--omo-composer-edge) solid var(--l3);
   border-radius: 999px;
   min-width: 0;
-  flex-shrink: 0;
+  max-width: 100%;
 }
-.sf-row[data-id="model-settings"] > .sf-button[data-id="model"] { flex-shrink: 1; }
-.sf-row[data-id="model-settings"] > .sf-button .sf-btn-label {
+.sf-menu[data-id="model"] .sf-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sf-menu[data-id="model"] .sf-menu-subpop {
+  width: max-content;
+  min-width: 0;
+  top: auto;
+  bottom: 0;
+}
 `;
+
+export const modelSettingsKey = (key: string) => key === "\x13" || key === "\x1b[115;5u";
 
 export function settingsNode(quotaAvailable: boolean) {
   return node("model-settings", "row", { align: "center" }, [
-    ...controls.map(([id, action, label]) => node(id, "button", {
-      text: id === "model" ? "OMO" : label, variant: "quiet", title: label, aria: label,
-      disabled: true, actions: { click: action },
-    })),
+    node("model", "menu", { text: "OMO", trigger: "quiet", variant: "dense",
+      title: "Model settings", disabled: true, open: false, items: [] }),
     ...(quotaAvailable ? [usageNode()] : []),
   ]);
-}
-
-export function settingAction(event: RpcRecord) {
-  return controls.find(([id, action]) => event.id === id && event.act === action)?.[1];
-}
-
-export function settingsDisabled(disabled: boolean): Op[] {
-  return controls.map(([id]) => ["set", id, { disabled }]);
 }
 
 /** Owns the last readback and fences reads superseded by newer reads, local writes, or shutdown. */
@@ -154,34 +147,30 @@ export class SessionSettings {
 
   show(state: RpcRecord) {
     this.#model = record(state.model);
-    const view = appliedSettings(state);
-    this.publish(state.model, controls.map(([id, , label]) => {
-      const value = view[id];
-      const description = `${label}: ${value || "not reported"}`;
-      return ["set", id, { text: value || `${label} —`, title: description, aria: description }];
-    }));
+    const { model, thinking, tier } = appliedSettings(state);
+    const speed = tier && !["auto", "default", "standard"].includes(tier) ? tier : "";
+    const description = `Model settings: ${model}; Thinking: ${thinking || "not reported"}; Service tier: ${tier || "not reported"}`;
+    this.publish(state.model, [["set", "model", {
+      text: [thinking, speed, model].filter(Boolean).join(" · "),
+      title: `Ctrl+S · ${description}`, aria: description,
+    }]]);
   }
 
   invalidate() { this.#revision++; }
 
-  async #read(client: OmoRpc) {
+  async read(client: OmoRpc, live = () => true) {
     const revision = ++this.#revision;
     const state = await client.getState();
-    if (revision === this.#revision) this.show(state);
+    if (revision === this.#revision && live()) this.show(state);
     return state;
   }
 
   async observed(client: OmoRpc, event: RpcRecord) {
     const expected = this.#revision + 1;
-    try { await this.#read(client); }
+    try { await this.read(client); }
     catch {
       if (expected === this.#revision && string(record(event.model).id)) this.show(event);
     }
-  }
-
-  async choices(client: OmoRpc, kind: SettingKind) {
-    const state = await this.#read(client);
-    return kind === "thinking" ? thinkingChoices(client, state) : modelChoices(client, state, kind);
   }
 
   async apply(client: OmoRpc, target: Setting) {
@@ -191,10 +180,10 @@ export class SessionSettings {
       try { await changeSetting(client, target); }
       catch (error) {
         // A refused or unacknowledged write may still have changed the session.
-        await this.#read(client).catch(() => undefined);
+        await this.read(client).catch(() => undefined);
         throw error;
       }
-      if (!settingApplied(await this.#read(client), target))
+      if (!settingApplied(await this.read(client), target))
         throw new ModelSettingsError("OmO did not confirm the selected setting");
     } finally { this.#applying = false; }
   }
