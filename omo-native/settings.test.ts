@@ -26,6 +26,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     case "get_state":
       if (attempted) appendFileSync("calls", "read\n");
       reply(state);
+      if (attempted && scenario === "reload") state = { model: base, serviceTier: "auto" };
       break;
     case "set_model":
       attempted = true;
@@ -54,6 +55,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 const cases = [
   { scenario: "default", tier: "default", outcome: "selected" },
   { scenario: "auto", tier: "auto", outcome: "selected" },
+  { scenario: "reload", tier: "auto", outcome: "unconfirmed" },
   { scenario: "stale", tier: "fast", outcome: "unconfirmed" },
   { scenario: "named", tier: "flex", outcome: "unconfirmed" },
   { scenario: "wrong provider", tier: "auto", outcome: "unconfirmed" },
@@ -76,7 +78,7 @@ for (const { scenario, tier, outcome } of cases) {
       const event = (value: object) => send(`\x1b_tsp;e;${JSON.stringify({ sf: surface, ...value })}\x1b\\`);
       const openTiers = () => event({ ev: "action", id: "tier", act: "tiers" });
       const draft = "unsent fixture draft";
-      let phase: "start" | "draft" | "pick" | "confirm" | "reopen" | "done" = "start";
+      let phase: "start" | "draft" | "pick" | "confirm" | "reopen" | "cancel" | "done" = "start";
       let draftText: unknown, activeTier: unknown, reopened: unknown, actualOutcome: unknown;
       let buffer = "";
       try {
@@ -114,13 +116,27 @@ for (const { scenario, tier, outcome } of cases) {
                 actualOutcome = "selected";
                 openTiers();
               } else if (phase === "confirm" && props.state === "error") {
-                phase = "done";
                 actualOutcome = String(props.message).includes("fixture refused model") ? "refused"
                   : String(props.message).includes("confirm") ? "unconfirmed" : props.message;
-                send("\x04");
-              } else if (phase === "reopen" && base) {
-                phase = "done";
+                if (scenario === "reload") {
+                  expect(activeTier).toBe("fast");
+                  phase = "reopen";
+                  event({ ev: "action", id, act: "retry" });
+                } else {
+                  phase = "done";
+                  send("\x04");
+                }
+              } else if (phase === "reopen" && props.state === "ready" && base) {
                 reopened = { current: props.current, selected: props.selected, base: base.id };
+                if (scenario === "reload") {
+                  phase = "cancel";
+                  event({ ev: "action", id, act: "close" });
+                } else {
+                  phase = "done";
+                  send("\x04");
+                }
+              } else if (phase === "cancel" && verb === "del") {
+                phase = "done";
                 send("\x04");
               }
             }
@@ -130,15 +146,15 @@ for (const { scenario, tier, outcome } of cases) {
         expect(phase).toBe("done");
         const calls = (await Bun.file(join(cwd, "calls")).text()).trim().split("\n");
         expect(calls.slice(0, 2)).toEqual(["write", "read"]);
-        expect(calls.filter(call => call !== "write" && call !== "read")).toEqual([]);
+        expect(calls.filter(call => call !== "read")).toEqual(["write"]);
         expect(draftText).toBe(draft);
-        expect(activeTier).toBe(tier);
         expect(actualOutcome).toBe(outcome);
-        if (outcome === "selected") {
+        if (outcome === "selected" || scenario === "reload") {
           const { current, selected, base } = record(reopened);
           expect(current).toEqual([base]);
           expect(selected).toBe(base);
         }
+        expect(activeTier).toBe(tier);
       } finally {
         child.kill();
         await child.exited;

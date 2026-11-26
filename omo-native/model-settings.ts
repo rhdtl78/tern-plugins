@@ -141,7 +141,7 @@ export function settingsDisabled(disabled: boolean): Op[] {
   return controls.map(([id]) => ["set", id, { disabled }]);
 }
 
-/** Owns the last readback and fences event reads that predate a local write or session shutdown. */
+/** Owns the last readback and fences reads superseded by newer reads, local writes, or shutdown. */
 export class SessionSettings {
   #model: RpcRecord = {};
   #revision = 0;
@@ -180,7 +180,7 @@ export class SessionSettings {
   }
 
   async choices(client: OmoRpc, kind: SettingKind) {
-    const state = await client.getState();
+    const state = await this.#read(client);
     return kind === "thinking" ? thinkingChoices(client, state) : modelChoices(client, state, kind);
   }
 
