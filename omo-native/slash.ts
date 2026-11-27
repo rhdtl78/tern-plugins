@@ -1,4 +1,4 @@
-import { RpcCommandError, RpcTransportError, type OmoRpc, type RpcRecord } from "./rpc";
+import { RpcCommandError, RpcRequestTimeoutError, RpcTransportError, type OmoRpc, type RpcRecord } from "./rpc";
 import { add, node, plain, record, string, type Op } from "./surface";
 import { sessionCommand, sessionCommands } from "./session-commands";
 
@@ -37,7 +37,7 @@ export class SlashMenu {
     try {
       reply = await source.request("get_commands");
     } catch (error) {
-      if (error instanceof RpcTransportError ||
+      if (error instanceof RpcTransportError || error instanceof RpcRequestTimeoutError ||
           (error instanceof RpcCommandError && error.command === "get_commands")) return;
       throw error;
     }

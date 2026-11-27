@@ -110,17 +110,43 @@ export function settingApplied(state: RpcRecord, target: Setting) {
 export const settingsCss = `
 .sf-col[data-id="composer"] > .sf-row[data-id="footer"] { flex-wrap: wrap; }
 .sf-row[data-id="model-settings"] { flex: 0 1 auto; min-width: 0; max-width: 100%; gap: var(--omo-composer-row-gap); }
-.sf-button[data-id="model"] {
+.sf-col[data-id="composer"] button[data-id="model"] {
   flex: 0 1 auto;
+  gap: var(--omo-composer-row-gap);
   border: var(--omo-composer-edge) solid var(--l3);
   border-radius: 999px;
   min-width: 0;
   max-width: 100%;
 }
-.sf-button[data-id="model"] .sf-btn-label {
+.sf-col[data-id="composer"] button[data-id="model"][aria-disabled="true"] {
+  opacity: .45;
+  pointer-events: none;
+}
+.sf-col[data-id="composer"] [data-id="model-name"] {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.sf-col[data-id="composer"] [data-id="model-effort"],
+.sf-col[data-id="composer"] [data-id="model-speed"] {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.sf-col[data-id="composer"] [data-id="model-speed"] {
+  width: 14px;
+  height: 14px;
+}
+.sf-col[data-id="composer"] [data-id="model-speed"][data-role="omp.composer.model-ultrafast"] {
+  width: 19px;
+}
+.sf-col[data-id="composer"] [data-id="model-speed"] .sf-icon {
+  width: 14px;
+  height: 14px;
+}
+.sf-col[data-id="composer"] [data-id="model-speed-extra"] {
+  margin-left: -9px;
+  transform: translateY(2px);
 }
 `;
 
@@ -128,8 +154,15 @@ export const modelSettingsKey = (key: string) => key === "\x13" || key === "\x1b
 
 export function settingsNode(quotaAvailable: boolean) {
   return node("model-settings", "row", { align: "center" }, [
-    node("model", "button", { text: "OMO", variant: "quiet",
-      title: "Model settings", disabled: true, actions: { click: "settings" } }),
+    node("model", "el", { tag: "button", class: "quiet", title: "Model settings",
+      attrs: { "aria-disabled": "true" }, actions: { click: "settings" } }, [
+      node("model-name", "el", { tag: "span", text: "OMO" }),
+      node("model-effort", "el", { tag: "span", hidden: true }),
+      node("model-speed", "el", { tag: "span", hidden: true, attrs: { "aria-hidden": "true" } }, [
+        node("model-speed-main", "icon", { name: "bolt" }),
+        node("model-speed-extra", "icon", { name: "bolt", hidden: true }),
+      ]),
+    ]),
     ...(quotaAvailable ? [usageNode()] : []),
   ]);
 }
@@ -149,12 +182,15 @@ export class SessionSettings {
   show(state: RpcRecord) {
     this.#model = record(state.model);
     const { model, thinking, tier } = appliedSettings(state);
-    const speed = tier && !["auto", "default", "standard"].includes(tier) ? tier : "";
     const description = `Model settings: ${model}; Thinking: ${thinking || "not reported"}; Service tier: ${tier || "not reported"}`;
-    this.publish(state.model, [["set", "model", {
-      text: [thinking, speed, model].filter(Boolean).join(" · "),
-      title: `Ctrl+S · ${description}`, aria: description,
-    }]]);
+    this.publish(state.model, [
+      ["set", "model", { title: `Ctrl+S · ${description}`, aria: description }],
+      ["set", "model-name", { text: model.toUpperCase() }],
+      ["set", "model-effort", { text: thinking ? `· ${thinking}` : "", hidden: !thinking }],
+      ["set", "model-speed", { hidden: tier !== "fast" && tier !== "ultrafast",
+        role: tier === "ultrafast" ? "omp.composer.model-ultrafast" : "" }],
+      ["set", "model-speed-extra", { hidden: tier !== "ultrafast" }],
+    ]);
   }
 
   invalidate() { this.#publishedRevision = ++this.#revision; }

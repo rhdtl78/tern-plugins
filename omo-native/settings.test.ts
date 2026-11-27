@@ -242,6 +242,7 @@ for (const { scenario, tier, outcome } of cases) {
       const draft = "unsent fixture draft";
       let phase: "start" | "draft" | "attach" | "pick" | "confirm" | "reopen" | "back" | "cancel" | "done" = "start";
       let draftText: unknown, modelTitle = "", confirmedTier = false, actualOutcome: unknown;
+      let modelLabel: unknown, effortLabel: unknown, speedHidden: unknown, extraBoltHidden: unknown;
       const backMenus: { heading: unknown; checked: unknown[]; speed: unknown; thinking: unknown[] }[] = [];
       let attachmentId = "", attachmentHidden: unknown;
       let buffer = "";
@@ -267,6 +268,10 @@ for (const { scenario, tier, outcome } of cases) {
               const [verb, id, value] = op;
               const props = record(value);
               if (verb === "set" && id === "model" && typeof props.title === "string") modelTitle = props.title;
+              if (verb === "set" && id === "model-name") modelLabel = props.text ?? modelLabel;
+              if (verb === "set" && id === "model-effort") effortLabel = props.hidden ? "" : props.text;
+              if (verb === "set" && id === "model-speed") speedHidden = props.hidden;
+              if (verb === "set" && id === "model-speed-extra") extraBoltHidden = props.hidden;
               if (verb === "set" && id === "draft") draftText = props.text ?? draftText;
               if (verb === "set" && id === "attachments") attachmentHidden = props.hidden ?? attachmentHidden;
               if (verb === "del" && id === attachmentId) attachmentId = "";
@@ -357,6 +362,10 @@ for (const { scenario, tier, outcome } of cases) {
         expect(actualOutcome).toBe(outcome);
         if (!thinking && (outcome === "selected" || scenario === "reload")) expect(confirmedTier).toBe(true);
         expect(modelTitle).toEndWith(`Service tier: ${tier}`);
+        expect(modelLabel).toBe(scenario === "wrong model" ? "OTHER" : "BASE");
+        expect(effortLabel).toBe(thinking ? "· high" : tier === "fast" ? "· low" : "");
+        expect(speedHidden).toBe(tier !== "fast");
+        expect(extraBoltHidden).toBe(true);
         if (scenario === "wrong model") {
           expect(modelTitle).toContain("Model settings: other; Thinking: not reported;");
           for (const menu of backMenus) {

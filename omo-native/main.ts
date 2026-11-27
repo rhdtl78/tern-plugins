@@ -21,10 +21,13 @@ import { renderUsage, supportsUsage, UsageMeter, usageCss } from "./usage";
 import { ComposerMode } from "./composer-mode";
 import { composerCss } from "./composer-style";
 import { PaneTerminal } from "./pane-terminal";
+import { SessionTitle } from "./session-title";
+import { QuickTitleClient } from "./quick-title-client";
 import { Clipboard, clipboardTimeoutNotice } from "./clipboard";
 import { attachmentCard, attachmentCount, clipboardFile, clipboardImage, fileEntries, sendBlock, type Attachment } from "./attachments";
 
 const screen = new Surface(), draft = new Editor();
+const sessionTitle = new SessionTitle(sequence => process.stdout.write(sequence));
 const input = new InputStream(() => { if (!clipboard.pending) clipboardError(clipboardTimeoutNotice); });
 const composerMode = new ComposerMode();
 let editor = draft;
@@ -40,6 +43,7 @@ let authorIcon: string | undefined;
 const transcriptNodes = new Set<string>();
 const cwd = process.cwd();
 let rpc: OmoRpc | undefined, unsubscribe: (() => void) | undefined;
+let quickTitle: QuickTitleClient | undefined;
 let background: ActivityProjection | undefined, quota: UsageMeter | undefined;
 let quotaAvailable = false;
 let live = false, ready = false, closing = false, busy = false, welcome = true;
@@ -126,7 +130,9 @@ function refresh() {
     ["set", "attachments", { hidden: !!ask || !attachments.size }],
     ["set", "attachment-error", { hidden: !!ask || !reason, text: reason ?? "" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
-    ["set", "model", { disabled: !canSend && !(picker instanceof SettingsPicker && !picker.applying) }],
+    ["set", "model", { attrs: {
+      "aria-disabled": String(!canSend && !(picker instanceof SettingsPicker && !picker.applying)),
+    } }],
     ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
     ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
@@ -162,6 +168,8 @@ function notify(text: string, tone: "info" | "error" = "info") {
   toastId = nextId;
 }
 function fail(e: unknown) {
+  quickTitle?.invalidate();
+  sessionTitle.observe(undefined);
   ready = false; busy = false; settings.invalidate();
   composerMode.clear();
   showPending([]);
@@ -183,6 +191,8 @@ function fail(e: unknown) {
 }
 async function close() {
   if (closing) return;
+  quickTitle?.invalidate();
+  sessionTitle.close();
   closing = true; settings.invalidate(); terminal.closing(); unsubscribe?.();
   cancelPaste(); input.expireClipboardFrame();
   quota?.close();
@@ -232,6 +242,11 @@ async function answer(fields: RpcRecord) {
 }
 function onRpc(e: RpcRecord) {
   if (closing) return;
+  if (e.type === "session_info_changed") { sessionTitle.observe(e.name); return; }
+  if (e.type === "session_replaced") {
+    quickTitle?.invalidate();
+    sessionTitle.observe(e.sessionName);
+  }
   if (e.type === "commands_changed") { slash.changed(e.sessionId, e.commands); return; }
   if (e.type === "session_closed") { fail("OmO session closed"); return; }
   if (e.type === "queue_update") { showPending(e.ordered); return; }
@@ -338,15 +353,25 @@ async function start(hello: RpcRecord) {
 }
 async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (closing) return;
+    quickTitle?.invalidate();
     const command = Bun.which("omo") ?? Bun.which(join(dirname(process.execPath), "omo")) ?? Bun.which(join(homedir(), ".bun/bin/omo"));
     if (!command) throw new Error("Could not find the omo executable");
-    const client = rpc = new OmoRpc({ cwd, argv: [command, "--mode", "rpc", "--listen", "stdio://"],
+    const client = rpc = new OmoRpc({ cwd, argv: [command, "--mode", "rpc", "--listen", "stdio://",
+        "--extension", join(import.meta.dir, "quick-title-extension.ts")],
       env: { PATH: [process.env.PATH, dirname(process.execPath)].filter(Boolean).join(":"),
+        TERN_QUICK_TITLE_FRESH: typeof fields.sessionPath === "string" ? "0" : "1",
         // Task activity also feeds the composer when Workflow is unavailable.
         SENPI_RPC_CLIENT_CAPABILITIES: "extension_events" },
       capabilities: ["interactive_user","question","extension_events"] });
+    const titles = quickTitle = new QuickTitleClient(client);
     const pending: RpcRecord[] = [];
-    const events = client.onEvent(e => ready ? onRpc(e) : pending.push(e));
+    const events = client.onEvent(e => {
+        if (e.type === "extension_event" && e.name === "tern.quickTitle") {
+          if (!closing && rpc === client)
+            void titles.offer(record(e.data)).catch(error => console.error("Quick title:", why(error)));
+        } else if (ready) onRpc(e);
+        else pending.push(e);
+    });
     const limits = client.onSubscriptionLimits(e => { void quota?.event(e); });
     unsubscribe = () => { events(); limits(); };
     const { state, sessionId } = await client.openSession({ auto_title: false, ...fields });
@@ -354,10 +379,14 @@ async function openSession(fields: RpcRecord, verify?: () => Promise<unknown>) {
     if (closing) return;
     const history = await client.getMessages();
     if (closing) return;
+    sessionTitle.observe(state.sessionName);
     ownSession(client, sessionId, state, history);
     if (Array.isArray(state.pendingQuestions)) for (const q of state.pendingQuestions) onRpc({ ...record(q), type: "extension_ui_request", method: "question" });
     pending.forEach(onRpc);
-    void client.exited.then(exit => { if (!closing) fail(`RPC exited (${exit.signal ?? exit.code})`); });
+    void client.exited.then(exit => {
+        titles.invalidate();
+        if (!closing && rpc === client) fail(`RPC exited (${exit.signal ?? exit.code})`);
+    });
     await slash.bind(client);
 }
 function ownSession(client: OmoRpc, sessionId: string, state: RpcRecord, history: readonly RpcRecord[]) {
@@ -384,6 +413,7 @@ function ownSession(client: OmoRpc, sessionId: string, state: RpcRecord, history
     frame(["focus", "draft"]);
 }
 async function reloadSession(client: OmoRpc, text: string, replaced: boolean) {
+  const titleRevision = sessionTitle.revision;
   const state = await client.getState(), history = await client.getMessages();
   if (closing || !ready || !client.sessionId) return;
   frame(...[...transcriptNodes].map(id => ["del", id]));
@@ -394,6 +424,7 @@ async function reloadSession(client: OmoRpc, text: string, replaced: boolean) {
   draft.reset(text);
   composerMode.clear();
   if (replaced) {
+    sessionTitle.restore(state.sessionName, titleRevision);
     background = undefined;
     quota?.close(); quota = undefined;
     workflow.disconnect();
@@ -587,7 +618,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
   else refresh();
   try {
     if (mode === "prompt") {
-      const reply = await rpc.prompt(text, fields);
+      const reply = await (quickTitle?.prompt(text, fields) ?? rpc.prompt(text, fields));
       // A slash command may finish inside an extension without any agent_idle.
       if (record(reply.data).disposition === "handled") {
         void workflow.refreshPlan();
@@ -618,6 +649,7 @@ async function submit(mode: SubmitMode, supplied?: string) {
 async function stop() {
   if (ask) return answer({ cancelled: true });
   if (!rpc || !busy || stopping) return;
+  quickTitle?.invalidate();
   const startedAt = activity;
   stopping = true;
   showStatus("Stopping…");

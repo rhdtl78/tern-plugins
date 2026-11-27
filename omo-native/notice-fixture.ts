@@ -85,7 +85,9 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   if (composer && type === "prompt") {
     if (++prompts !== 1 || fields.message !== "Run fixture" ||
-        Object.keys(fields).sort().join() !== "message,sessionId") process.exit(8);
+        typeof fields.clientMessageId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fields.clientMessageId) ||
+        Object.keys(fields).sort().join() !== "clientMessageId,message,sessionId") process.exit(8);
   }
   if (${scenario === "clipboard"} && type === "prompt") appendFileSync(${JSON.stringify(promptsFile)}, JSON.stringify(fields.message) + "\\n");
   if (type === "abort" && (composer || queue) &&
