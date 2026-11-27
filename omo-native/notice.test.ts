@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkpoint, model, refusal, warning } from "./notice-fixture";
+import { checkpoint, refusal, warning } from "./notice-fixture";
 import { exercise, hasDetail, visible, withText, type Views } from "./notice-pty";
 import { record, string } from "./surface";
 
@@ -54,7 +54,7 @@ test("shows progress outside the composer and keeps engine exit in main", async 
       parent: "session-feedback", kind: "spinner", props: { hidden: phase === opening },
     });
     expect(views.get("model")?.props.hidden).not.toBe(true);
-    expect(views.get("model")?.props.text).toBe(phase === opening ? "OMO" : model);
+    expect(views.get("model")?.props.text).toBe(phase === opening ? "OMO" : "FIXTURE MODEL");
     expect(views.get("stop")?.props.hidden).toBe(phase === opening);
     expect(withText(views, "ULW 실행 중")).toEqual([]);
   }

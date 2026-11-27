@@ -113,7 +113,7 @@ Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of
 
 ### Choose model settings
 
-When the session is idle, open **Model settings** from the footer or press **Ctrl+S**. The button shows the session’s model, Thinking level, and any non-default speed. The popover opens above the button and shows the confirmed Thinking level. Move the stepped slider to choose a supported level, or use **←** and **→** and press **Enter** to apply.
+When the session is idle, open **Model settings** from the footer or press **Ctrl+S**. The button shows the model name in uppercase, followed by the reported Thinking level. Fast adds one bolt, Ultrafast adds two overlapping bolts, and Standard has no bolt. The popover opens above the button and shows the confirmed Thinking level. Move the stepped slider to choose a supported level, or use **←** and **→** and press **Enter** to apply.
 
 Click the model name to open a scrollable list in the same popover. Type part of a model name, provider, or model ID to filter the list. Click a model, or highlight it with **↑**, **↓**, or **Tab** and press **Enter**. **Speed** appears at the top left only when OmO confirms switchable variants; the bolt marks Fast. Hover or click it to see the available tiers and the checked current tier, or press **Ctrl+S** again to enter Speed with the keyboard. **Back** returns to Thinking without applying a change.
 

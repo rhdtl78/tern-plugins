@@ -110,17 +110,38 @@ export function settingApplied(state: RpcRecord, target: Setting) {
 export const settingsCss = `
 .sf-col[data-id="composer"] > .sf-row[data-id="footer"] { flex-wrap: wrap; }
 .sf-row[data-id="model-settings"] { flex: 0 1 auto; min-width: 0; max-width: 100%; gap: var(--omo-composer-row-gap); }
-.sf-button[data-id="model"] {
+.sf-col[data-id="composer"] .sf-row[data-id="model-settings"] > .sf-button[data-id="model"] {
   flex: 0 1 auto;
   border: var(--omo-composer-edge) solid var(--l3);
   border-radius: 999px;
   min-width: 0;
   max-width: 100%;
 }
-.sf-button[data-id="model"] .sf-btn-label {
+.sf-col[data-id="composer"] .sf-row[data-id="model-settings"] > .sf-button[data-id="model"] .sf-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.sf-col[data-id="composer"] .sf-row[data-id="model-settings"] > .sf-button[data-id="model"] .sf-btn-ic {
+  flex-shrink: 0;
+  order: 1;
+}
+.sf-col[data-id="composer"] .sf-button[data-role="omp.composer.model-ultrafast"] .sf-btn-ic {
+  position: relative;
+  margin-left: .2em;
+}
+.sf-col[data-id="composer"] .sf-button[data-role="omp.composer.model-ultrafast"] .sf-btn-ic > svg {
+  transform: translate(-.2em, -.1em);
+}
+.sf-col[data-id="composer"] .sf-button[data-role="omp.composer.model-ultrafast"] .sf-btn-ic::after {
+  /* Text presentation keeps the overlapping bolt monochrome. */
+  content: "⚡︎";
+  position: absolute;
+  left: 40%;
+  top: 17%;
+  font: inherit;
+  line-height: 1;
+  pointer-events: none;
 }
 `;
 
@@ -149,10 +170,11 @@ export class SessionSettings {
   show(state: RpcRecord) {
     this.#model = record(state.model);
     const { model, thinking, tier } = appliedSettings(state);
-    const speed = tier && !["auto", "default", "standard"].includes(tier) ? tier : "";
     const description = `Model settings: ${model}; Thinking: ${thinking || "not reported"}; Service tier: ${tier || "not reported"}`;
     this.publish(state.model, [["set", "model", {
-      text: [thinking, speed, model].filter(Boolean).join(" · "),
+      text: [model.toUpperCase(), thinking].filter(Boolean).join(" · "),
+      icon: tier === "fast" || tier === "ultrafast" ? "bolt" : "",
+      role: tier === "ultrafast" ? "omp.composer.model-ultrafast" : "omp.composer.model",
       title: `Ctrl+S · ${description}`, aria: description,
     }]]);
   }
