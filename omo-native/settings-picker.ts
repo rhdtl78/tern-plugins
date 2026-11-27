@@ -12,6 +12,7 @@ const message = (error: unknown) => plain(error instanceof Error ? error.message
 export class SettingsPicker extends Picker {
   #view: ReturnType<typeof appliedSettings> | undefined;
   #stateError = "";
+  #writeError = false;
   #catalog: Catalog | undefined;
   #catalogError = "";
   #thinkingError = "";
@@ -35,7 +36,7 @@ export class SettingsPicker extends Picker {
     const children = this.applying ? settingsStatus("Applying setting…", [])
       : this.state === "error" ? settingsStatus(this.message, root ? ["retry", "close"] : ["back", "retry", "close"], root)
       : this.state === "loading" ? settingsStatus(root ? "Loading settings…" : "Loading models…", root ? ["close"] : ["back", "close"], root)
-      : this.kind === "models" ? modelsPanel({ rows: this.visible, selected: this.selected, query: this.query })
+      : this.kind === "models" ? modelsPanel({ rows: this.visible, catalog: this.rows, selected: this.selected, query: this.query })
       : effortPanel({
         active: this.#active, pinned: this.#pinned, model: this.#view?.name || "Model",
         effort: effort ? effort.charAt(0).toUpperCase() + effort.slice(1)
@@ -50,7 +51,11 @@ export class SettingsPicker extends Picker {
   }
 
   #chooseRoot(act: string) {
-    if (act === "models") { this.page("models"); return "draw"; }
+    if (act === "models") {
+      if (this.#writeError) { this.kind = "models"; return "retry"; }
+      this.page("models");
+      return "draw";
+    }
     if (this.state !== "ready") return;
     if (this.#speed.some(row => row.id === act)) this.page("tiers");
     else if (!this.#thinking.some(row => row.id === act)) return;
@@ -95,11 +100,12 @@ export class SettingsPicker extends Picker {
         this.#active = ids[((index < 0 && delta < 0 ? 0 : index) + delta + ids.length) % ids.length] ?? "";
         return "draw" as const;
       };
-      if (modelSettingsKey(key) && tiers.length) act = "speed";
-      else if (this.state !== "ready") {
+      if (this.state !== "ready") {
         if (key === "\r" || key === "\x1b[13u") return this.state === "error" ? "retry" : undefined;
         return;
-      } else {
+      }
+      if (modelSettingsKey(key) && tiers.length) act = "speed";
+      else {
         switch (key) {
           case "\t": case "\x1b[9u": case "\x1b[B": return move(this.#pinned ? tierIds : root, 1);
           case "\x1b[Z": case "\x1b[9;2u": case "\x1b[A": return move(this.#pinned ? tierIds : root, -1);
@@ -125,7 +131,7 @@ export class SettingsPicker extends Picker {
       if (this.kind === "tiers") this.page("settings");
       return "retry";
     }
-    if (act === "speed" && tiers.length) {
+    if (act === "speed" && this.state === "ready" && tiers.length) {
       this.#pinned = !this.#pinned;
       this.#active = this.#pinned ? tiers.find(row => row.current)?.id ?? tiers[0]?.id ?? "" : "speed";
       return "draw";
@@ -153,6 +159,14 @@ export class SettingsPicker extends Picker {
     }
   }
 
+  writeFailed(reason: string) {
+    ++this.#revision; // Reads of options started before the write cannot restore readiness.
+    this.applying = false;
+    this.state = "error";
+    this.message = reason;
+    this.#writeError = true;
+  }
+
   async reload({ settings, client, live, draw }: {
     settings: SessionSettings; client: Pick<OmoRpc, "getState" | "getProtocolInfo" | "request">; live: () => boolean; draw: () => void;
   }) {
@@ -160,6 +174,7 @@ export class SettingsPicker extends Picker {
     const current = () => live() && revision === this.#revision;
     this.#view = undefined;
     this.#catalog = undefined;
+    this.#writeError = false;
     this.#stateError = this.#catalogError = this.#thinkingError = "";
     this.#thinking = [];
     this.#active = "";

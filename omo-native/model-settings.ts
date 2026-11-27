@@ -12,6 +12,11 @@ type SettingRow = {
   readonly id: string; readonly label: string; readonly detail: string; readonly current?: boolean;
   readonly target: Setting;
 };
+const speedOrder = ["Standard", "Fast", "Ultrafast"];
+const speedRank = (label: string) => {
+  const index = speedOrder.indexOf(label);
+  return index < 0 ? speedOrder.length : index;
+};
 function tierLabel(value: unknown) {
   return value === "priority" ? "fast" : string(value);
 }
@@ -70,7 +75,8 @@ export async function modelCatalog(rpc: Pick<OmoRpc, "request" | "getProtocolInf
       target: sameModel(m, base ?? current) && listed
         ? { provider, modelId: string(listed.id) } : { provider, modelId } });
   }
-  return { models: modelsRows, tiers: tiers.length > 1 ? tiers : [] };
+  return { models: modelsRows, tiers: tiers.length > 1
+    ? tiers.sort((a, b) => speedRank(a.label) - speedRank(b.label)) : [] };
 }
 
 export async function thinkingChoices(rpc: Pick<OmoRpc, "request">, state: RpcRecord): Promise<SettingRow[]> {

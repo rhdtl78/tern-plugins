@@ -104,7 +104,7 @@ test("only confirmed variants with a same-provider base move to the tier picker"
   const state = { model: solo, serviceTier: "ultrafast", thinkingLevel: "medium" };
   const rpc = {
     getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
-    request: async () => ({ data: { models: [base, fast, solo] } }),
+    request: async () => ({ data: { models: [fast, base, solo] } }),
   };
   const catalog = await modelCatalog(rpc, state);
   expect(catalog.models.map(row => row.label)).toEqual([base.id, solo.id]);

@@ -114,7 +114,7 @@ export const settingsPanelCss = `
 [data-id="sp-effort"] :is(.sf-slider-label, .sf-slider-value, .sf-slider-ends, .sf-slider-bubble) {
   display: none !important;
 }
-[data-id="sp-effort"] .sf-slider-track {
+[data-id="sp-effort"] .sf-slider-track, [data-role="omo.effort-unknown"] {
   display: flex;
   align-items: center;
   padding: 0 calc(var(--sp-thumb) / 2);
@@ -142,9 +142,27 @@ export const settingsPanelCss = `
   box-shadow: none !important;
   z-index: 1;
 }
-[data-id="sp-effort"][data-role="omo.effort-unknown"] :is(.sf-slider-thumb, .sf-slider-fill) { opacity: 0; }
+[data-id="sp-effort-stops"] { flex: 1; height: 100%; gap: 0; }
+[data-id="sp-effort-stops"] > .sf-button {
+  position: relative;
+  flex: 2 1 0;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+}
+[data-id="sp-effort-stops"] > .sf-button:is(:first-child, :last-child) { flex-grow: 1; }
+[data-id="sp-effort-stops"] > .sf-button::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  pointer-events: none;
+}
+[data-id="sp-effort-stops"] > .sf-button:first-child::after { left: 0; }
+[data-id="sp-effort-stops"] > .sf-button:last-child::after { left: 100%; }
 [data-id="sp-effort"] .sf-slider-ticks { top: 50%; transform: none; }
-[data-id="sp-effort"] .sf-slider-tick {
+[data-id="sp-effort"] .sf-slider-tick, [data-id="sp-effort-stops"] > .sf-button::after {
   width: var(--sp-tick);
   height: var(--sp-tick);
   border-radius: 50%;

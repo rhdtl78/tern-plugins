@@ -70,17 +70,67 @@ test("Model and Back preserve a failed state read until settings are reloaded", 
   expect(action("retry")).toBe("retry");
   fail = false;
   await picker.reload(load);
-  const modelLink = (nodes: unknown): RpcRecord | undefined => {
-    for (const raw of Array.isArray(nodes) ? nodes : []) {
-      const entry = record(raw);
-      if (entry.id === "sp-models") return record(entry.p);
-      const found = modelLink(entry.c);
-      if (found) return found;
-    }
-  };
-  expect(picker.draw().map(op => modelLink([op[4]])).find(Boolean)?.text).toBe(model.name);
+  expect(panelProp(picker, "sp-models").text).toBe(model.name);
   expect(action("models")).toBe("draw");
-  expect(picker.props(true)).toMatchObject({ state: "ready", selected: "m0", current: ["m0"] });
+  expect(panelProp(picker, "sp-m0").value).toBe("✓");
+});
+
+test("a pending catalog cannot clear an effort write error or make stale Models actionable", async () => {
+  const old = { id: "old", provider: "fixture", name: "Old model" };
+  const next = { id: "next", provider: "fixture", name: "New model" };
+  const pending = Promise.withResolvers<{ data: RpcRecord }>();
+  const refreshed = Promise.withResolvers<RpcRecord>();
+  let reading = false, draws = 0;
+  const p = new SettingsPicker("test");
+  const load = {
+    settings: new SessionSettings(() => {}),
+    client: {
+      getState: async () => reading ? refreshed.promise : { model: old, thinkingLevel: "low" },
+      getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
+      request: async (type: string) => type === "get_available_models"
+        ? reading ? { data: { models: [old, next] } } : pending.promise
+        : { data: { levels: reading ? ["off"] : ["low", "medium"] } },
+    },
+    live: () => true, draw: () => { draws++; },
+  };
+  const first = p.reload(load);
+  await Bun.sleep(0);
+  expect(p.input({ kind: "event", value: { id: "sp-effort", ev: "change", value: 1 } })).toBe("use");
+  p.writeFailed("Unconfirmed effort");
+  const errorDraws = draws;
+  pending.resolve({ data: { models: [old, next] } }); await first;
+  expect(draws).toBe(errorDraws);
+  expect(panelProp(p, "sp-message").text).toBe("Unconfirmed effort");
+  expect(p.input({ kind: "event", value: { id: "sp-models", ev: "action", act: "models" } })).toBe("retry");
+  reading = true;
+  const retry = p.reload(load);
+  expect(panelProp(p, "sp-list")).toEqual({});
+  refreshed.resolve({ model: next, thinkingLevel: "off" }); await retry;
+  expect(panelProp(p, "sp-m0").value).toBe("");
+  expect(panelProp(p, "sp-m1").value).toBe("✓");
+  p.page("settings");
+  expect(panelProp(p, "sp-title").text).toBe("Off");
+  expect(panelProp(p, "sp-speed-trigger")).toEqual({});
+});
+
+test("the rendered model identity survives a filter that hides the colliding row", async () => {
+  const one = { id: "id-1", provider: "one", name: "Local" };
+  const two = { id: "id-2", provider: "two", name: "Local" };
+  const p = new SettingsPicker("test");
+  await p.reload({
+    settings: new SessionSettings(() => {}),
+    client: {
+      getState: async () => ({ model: one }),
+      getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
+      request: async (type: string) => ({ data: type === "get_available_models" ? { models: [one, two] } : { levels: [] } }),
+    },
+    live: () => true, draw: () => {},
+  });
+  p.page("models");
+  expect(panelProp(p, "sp-m0").detail).toBe("one/id-1");
+  p.input({ kind: "paste", value: "two/id-2" });
+  expect(panelProp(p, "sp-m0")).toEqual({});
+  expect(panelProp(p, "sp-m1")).toMatchObject({ detail: "two/id-2", aria: "Local · two/id-2" });
 });
 
 const fixture = String.raw`
@@ -163,6 +213,9 @@ const b64 = (value: string) => Buffer.from(value).toString("base64");
 const osc = (value: string) => `\x1b]5522;type=read:${value}\x1b\\`;
 function panelNodes(nodes: unknown): RpcRecord[] {
   return (Array.isArray(nodes) ? nodes : []).map(record).flatMap(n => [n, ...panelNodes(n.c)]);
+}
+function panelProp(picker: SettingsPicker, id: string) {
+  return record(panelNodes(picker.draw().map(op => op[4])).find(n => n.id === id)?.p);
 }
 
 for (const { scenario, tier, outcome } of cases) {

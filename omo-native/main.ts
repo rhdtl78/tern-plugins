@@ -495,7 +495,8 @@ async function choose(p: Picker) {
     refresh();
   } catch (e) {
     if (p !== picker || closing) { if (!closing) refresh(); return; }
-    p.applying = false; p.state = "error"; p.message = why(e);
+    if (p instanceof SettingsPicker) p.writeFailed(why(e));
+    else { p.applying = false; p.state = "error"; p.message = why(e); }
     drawPicker(p);
   }
 }

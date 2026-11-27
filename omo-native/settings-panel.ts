@@ -2,6 +2,7 @@ import { add, node } from "./surface";
 import type { RpcRecord } from "./rpc";
 
 type Choice = { readonly id: string; readonly label: string; readonly current?: boolean };
+type ModelChoice = Choice & { readonly detail: string };
 type View = {
   readonly active: string;
   readonly pinned: boolean;
@@ -15,7 +16,6 @@ type View = {
 const button = (id: string, text: string, action: string, props: RpcRecord = {}) =>
   node(id, "button", { text, variant: "quiet", ...props, actions: { click: action } });
 const label = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-const speedOrder = ["Ultrafast", "Fast", "Standard"];
 const modelsButton = (model: string, active = false) => button("sp-models", model, "models", {
   title: model, aria: `Select model: ${model}`,
   role: active ? "omo.settings-active" : "",
@@ -31,8 +31,7 @@ export function effortPanel(v: View) {
         role: v.active === "speed" ? "omo.settings-active" : "",
       }),
       node("sp-speed-options", "col", { aria: "Speed options" },
-        [...v.speeds].sort((a, b) => speedOrder.indexOf(b.label) - speedOrder.indexOf(a.label))
-          .map(row => button(`sp-${row.id}`, row.label, row.id, {
+        v.speeds.map(row => button(`sp-${row.id}`, row.label, row.id, {
             icon: row.current ? "check" : "",
             aria: row.current ? `${row.label}, current speed` : row.label,
             role: v.active === row.id ? "omo.settings-active" : "",
@@ -46,11 +45,16 @@ export function effortPanel(v: View) {
       button("sp-close", "", "close", { icon: "x", aria: "Close model settings", title: "Close (Esc)" }),
     ]),
     modelsButton(v.model, v.active === "models"),
-    ...(v.levels.length > 1 ? [
-      node("sp-effort", "slider", {
-        min: 0, max: v.levels.length - 1, step: 1, value: index < 0 ? -1 : index,
+    ...(v.levels.length > 1 ? [index < 0
+      // A slider always has a value; unset effort needs independently actionable stops.
+      ? node("sp-effort", "row", { role: "omo.effort-unknown", aria: "Reasoning effort, no reported selection" }, [
+        node("sp-effort-stops", "row", {}, v.levels.map(row =>
+          button(`sp-${row.id}`, "", row.id, { aria: label(row.label), title: label(row.label) }))),
+      ])
+      : node("sp-effort", "slider", {
+        min: 0, max: v.levels.length - 1, step: 1, value: index,
         label: "Reasoning effort", title: `${v.levels.map(row => label(row.label)).join(" · ")} (Left/Right, Enter)`,
-        ticks: true, variant: "accent", role: index < 0 ? "omo.effort-unknown" : "",
+        ticks: true, variant: "accent",
       }),
     ] : v.levels.filter(row => !row.current).map(row => button("sp-unset-effort", label(row.label), row.id, {
       role: v.active === row.id ? "omo.settings-active" : "",
@@ -59,7 +63,14 @@ export function effortPanel(v: View) {
   ];
 }
 
-export function modelsPanel(view: { readonly rows: readonly Choice[]; readonly selected: string; readonly query: string }) {
+export function modelsPanel(view: {
+  readonly rows: readonly ModelChoice[]; readonly catalog: readonly ModelChoice[]; readonly selected: string; readonly query: string;
+}) {
+  const seen = new Set<string>(), duplicates = new Set<string>();
+  for (const row of view.catalog) {
+    if (seen.has(row.label)) duplicates.add(row.label);
+    seen.add(row.label);
+  }
   return [
     node("sp-model-head", "row", {}, [
       button("sp-back", "‹", "back", { title: "Back", aria: "Back to model settings" }),
@@ -69,10 +80,14 @@ export function modelsPanel(view: { readonly rows: readonly Choice[]; readonly s
     ...(view.query ? [node("sp-filter", "text", { text: view.query, aria: "Model filter" })] : []),
     node("sp-list", "list", {
       max: 0.30, aria: "Available models", selected: `sp-${view.selected}`, filter: view.query, empty: "No matching models",
-    }, view.rows.map(row => node(`sp-${row.id}`, "item", {
-      label: row.label, title: row.label, value: row.current ? "✓" : "",
-      aria: row.current ? `${row.label}, current model` : row.label,
-    }))),
+    }, view.rows.map(row => {
+      const detail = duplicates.has(row.label) ? row.detail : "";
+      const title = detail ? `${row.label} · ${detail}` : row.label;
+      return node(`sp-${row.id}`, "item", {
+        label: row.label, ...(detail ? { detail } : {}), title, value: row.current ? "✓" : "",
+        aria: row.current ? `${title}, current model` : title,
+      });
+    })),
   ];
 }
 
