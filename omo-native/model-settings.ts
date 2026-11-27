@@ -12,6 +12,11 @@ type SettingRow = {
   readonly id: string; readonly label: string; readonly detail: string; readonly current?: boolean;
   readonly target: Setting;
 };
+const speedOrder = ["Standard", "Fast", "Ultrafast"];
+const speedRank = (label: string) => {
+  const index = speedOrder.indexOf(label);
+  return index < 0 ? speedOrder.length : index;
+};
 function tierLabel(value: unknown) {
   return value === "priority" ? "fast" : string(value);
 }
@@ -70,7 +75,8 @@ export async function modelCatalog(rpc: Pick<OmoRpc, "request" | "getProtocolInf
       target: sameModel(m, base ?? current) && listed
         ? { provider, modelId: string(listed.id) } : { provider, modelId } });
   }
-  return { models: modelsRows, tiers: tiers.length > 1 ? tiers : [] };
+  return { models: modelsRows, tiers: tiers.length > 1
+    ? tiers.sort((a, b) => speedRank(a.label) - speedRank(b.label)) : [] };
 }
 
 export async function thinkingChoices(rpc: Pick<OmoRpc, "request">, state: RpcRecord): Promise<SettingRow[]> {
@@ -104,32 +110,17 @@ export function settingApplied(state: RpcRecord, target: Setting) {
 export const settingsCss = `
 .sf-col[data-id="composer"] > .sf-row[data-id="footer"] { flex-wrap: wrap; }
 .sf-row[data-id="model-settings"] { flex: 0 1 auto; min-width: 0; max-width: 100%; gap: var(--omo-composer-row-gap); }
-.sf-menu[data-id="model"] { flex: 0 1 auto; min-width: 0; }
-.sf-menu[data-id="model"] .sf-menu-trigger {
+.sf-button[data-id="model"] {
+  flex: 0 1 auto;
   border: var(--omo-composer-edge) solid var(--l3);
   border-radius: 999px;
   min-width: 0;
   max-width: 100%;
 }
-.sf-menu[data-id="model"] .sf-btn-label {
+.sf-button[data-id="model"] .sf-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.sf-menu[data-id="model"] [data-act="models"] .sf-menu-label {
-  display: block;
-  /* Keep the model label and chevron inside Tern's default menu width. */
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sf-menu[data-id="model"] [data-act="models"]::after { content: "›"; }
-.sf-menu[data-id="model"] .sf-menu-subpop {
-  width: max-content;
-  min-width: 0;
-  top: auto;
-  bottom: 0;
 }
 `;
 
@@ -137,8 +128,8 @@ export const modelSettingsKey = (key: string) => key === "\x13" || key === "\x1b
 
 export function settingsNode(quotaAvailable: boolean) {
   return node("model-settings", "row", { align: "center" }, [
-    node("model", "menu", { text: "OMO", trigger: "quiet", variant: "dense",
-      title: "Model settings", disabled: true, open: false, items: [] }),
+    node("model", "button", { text: "OMO", variant: "quiet",
+      title: "Model settings", disabled: true, actions: { click: "settings" } }),
     ...(quotaAvailable ? [usageNode()] : []),
   ]);
 }

@@ -32,7 +32,7 @@ export async function selectedSession(target: SavedTarget, cwd: string) {
   return { fields: await verify(), verify };
 }
 
-type Effect = "draw" | "close" | "use" | "retry" | "back" | undefined;
+type Effect = "draw" | "select" | "close" | "use" | "retry" | "back" | undefined;
 export class Picker {
   state: "loading" | "ready" | "error" = "loading";
   message = "";

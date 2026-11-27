@@ -26,7 +26,7 @@ test.each(["event first", "picker first", "picker rejected", "session closed"] a
     let live = true, draws = 0;
     const event = settings.observed(client, {});
     const reload = picker.reload({ settings, client, live: () => live, draw: () => { draws++; } });
-    expect(picker.menuInput({ kind: "key", value: "\x1b" })).toBe("close");
+    expect(picker.input({ kind: "key", value: "\x1b" })).toBe("close");
     live = false;
     if (order === "session closed") settings.invalidate();
     if (order === "event first") {
@@ -62,17 +62,75 @@ test("Model and Back preserve a failed state read until settings are reloaded", 
     },
     live: () => true, draw: () => {},
   };
-  const action = (act: string) => picker.menuInput({ kind: "event", value: { id: "model", ev: "action", act } });
+  const action = (act: string) => picker.input({ kind: "event", value: { id: `sp-${act}`, ev: "action", act } });
   await picker.reload(load);
-  expect(action("models")).toBe("models");
+  expect(action("models")).toBe("draw");
   expect(picker.props()).toMatchObject({ state: "error", message: "Fixture state read failed" });
   picker.page("settings"); // Back callback; main.ts retries automatically on errors.
-  expect(action("reload")).toBe("retry");
+  expect(action("retry")).toBe("retry");
   fail = false;
   await picker.reload(load);
-  expect(picker.menuProps().items).toContainEqual({ id: "models", label: model.name });
-  expect(action("models")).toBe("models");
-  expect(picker.props(true)).toMatchObject({ state: "ready", selected: "m0", current: ["m0"] });
+  expect(panelProp(picker, "sp-models").text).toBe(model.name);
+  expect(action("models")).toBe("draw");
+  expect(panelProp(picker, "sp-m0").value).toBe("✓");
+});
+
+test("a pending catalog cannot clear an effort write error or make stale Models actionable", async () => {
+  const old = { id: "old", provider: "fixture", name: "Old model" };
+  const next = { id: "next", provider: "fixture", name: "New model" };
+  const pending = Promise.withResolvers<{ data: RpcRecord }>();
+  const refreshed = Promise.withResolvers<RpcRecord>();
+  let reading = false, draws = 0;
+  const p = new SettingsPicker("test");
+  const load = {
+    settings: new SessionSettings(() => {}),
+    client: {
+      getState: async () => reading ? refreshed.promise : { model: old, thinkingLevel: "low" },
+      getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
+      request: async (type: string) => type === "get_available_models"
+        ? reading ? { data: { models: [old, next] } } : pending.promise
+        : { data: { levels: reading ? ["off"] : ["low", "medium"] } },
+    },
+    live: () => true, draw: () => { draws++; },
+  };
+  const first = p.reload(load);
+  await Bun.sleep(0);
+  expect(p.input({ kind: "event", value: { id: "sp-effort", ev: "change", value: 1 } })).toBe("use");
+  p.writeFailed("Unconfirmed effort");
+  const errorDraws = draws;
+  pending.resolve({ data: { models: [old, next] } }); await first;
+  expect(draws).toBe(errorDraws);
+  expect(panelProp(p, "sp-message").text).toBe("Unconfirmed effort");
+  expect(p.input({ kind: "event", value: { id: "sp-models", ev: "action", act: "models" } })).toBe("retry");
+  reading = true;
+  const retry = p.reload(load);
+  expect(panelProp(p, "sp-list")).toEqual({});
+  refreshed.resolve({ model: next, thinkingLevel: "off" }); await retry;
+  expect(panelProp(p, "sp-m0").value).toBe("");
+  expect(panelProp(p, "sp-m1").value).toBe("✓");
+  p.page("settings");
+  expect(panelProp(p, "sp-title").text).toBe("Off");
+  expect(panelProp(p, "sp-speed-trigger")).toEqual({});
+});
+
+test("the rendered model identity survives a filter that hides the colliding row", async () => {
+  const one = { id: "id-1", provider: "one", name: "Local" };
+  const two = { id: "id-2", provider: "two", name: "Local" };
+  const p = new SettingsPicker("test");
+  await p.reload({
+    settings: new SessionSettings(() => {}),
+    client: {
+      getState: async () => ({ model: one }),
+      getProtocolInfo: async () => ({ data: { capabilities: ["session_model_scope"] } }),
+      request: async (type: string) => ({ data: type === "get_available_models" ? { models: [one, two] } : { levels: [] } }),
+    },
+    live: () => true, draw: () => {},
+  });
+  p.page("models");
+  expect(panelProp(p, "sp-m0").detail).toBe("one/id-1");
+  p.input({ kind: "paste", value: "two/id-2" });
+  expect(panelProp(p, "sp-m0")).toEqual({});
+  expect(panelProp(p, "sp-m1")).toMatchObject({ detail: "two/id-2", aria: "Local · two/id-2" });
 });
 
 const fixture = String.raw`
@@ -153,6 +211,12 @@ const cases = [
 
 const b64 = (value: string) => Buffer.from(value).toString("base64");
 const osc = (value: string) => `\x1b]5522;type=read:${value}\x1b\\`;
+function panelNodes(nodes: unknown): RpcRecord[] {
+  return (Array.isArray(nodes) ? nodes : []).map(record).flatMap(n => [n, ...panelNodes(n.c)]);
+}
+function panelProp(picker: SettingsPicker, id: string) {
+  return record(panelNodes(picker.draw().map(op => op[4])).find(n => n.id === id)?.p);
+}
 
 for (const { scenario, tier, outcome } of cases) {
   const thinking = scenario === "catalog failed";
@@ -173,14 +237,11 @@ for (const { scenario, tier, outcome } of cases) {
       });
       const send = (bytes: string) => { child.stdin.write(bytes); child.stdin.flush(); };
       const event = (value: object) => send(`\x1b_tsp;e;${JSON.stringify({ sf: surface, ...value })}\x1b\\`);
-      const open = () => event({ ev: "toggle", id: "model", open: true });
-      const pickMenu = (act: string) => {
-        event({ ev: "action", id: "model", act, checked: true });
-        event({ ev: "toggle", id: "model", open: false });
-      };
+      const action = (id: unknown, act: string) => event({ ev: "action", id, act });
+      const open = () => action("model", "settings");
       const draft = "unsent fixture draft";
       let phase: "start" | "draft" | "attach" | "pick" | "confirm" | "reopen" | "back" | "cancel" | "done" = "start";
-      let draftText: unknown, modelTitle = "", menuChecked: unknown, reopened: unknown, actualOutcome: unknown;
+      let draftText: unknown, modelTitle = "", confirmedTier = false, actualOutcome: unknown;
       const backMenus: { heading: unknown; checked: unknown[]; speed: unknown; thinking: unknown[] }[] = [];
       let attachmentId = "", attachmentHidden: unknown;
       let buffer = "";
@@ -223,65 +284,64 @@ for (const { scenario, tier, outcome } of cases) {
                 phase = "pick";
                 open();
               }
-              const items = Array.isArray(props.items) ? props.items.map(record) : [];
-              if (id === "model" && props.open === true) {
-                const tiers = record(items.find(item => item.id === "speed")).items;
+              if (typeof id !== "string" || !id.startsWith("pick") || id.endsWith(".dismiss")) continue;
+              const body = verb === "add" && id.endsWith(".body");
+              const nodes = body ? panelNodes([op[4]]) : [];
+              if (body) {
+                const propsOf = (key: string) => record(nodes.find(n => n.id === key)?.p);
+                const standard = nodes.find(n => String(n.id).startsWith("sp-t") && record(n.p).text === "Standard");
+                const option = record(standard?.p);
+                const act = record(option.actions).click;
+                const effort = propsOf("sp-effort");
+                const single = propsOf("sp-unset-effort");
+                const notice = propsOf("sp-message").text;
                 if (phase === "back") {
-                  const thinking = items.filter(item => String(item.id).startsWith("l"));
                   backMenus.push({
-                    heading: items[0]?.header,
-                    checked: [...items, ...(Array.isArray(tiers) ? tiers.map(record) : [])]
-                      .filter(item => item.checked).map(item => item.label),
-                    speed: items.find(item => item.id === "speed")?.label,
-                    thinking: thinking.map(item => item.label),
+                    heading: propsOf("sp-title").text,
+                    checked: nodes.filter(item => record(item.p).icon === "check"),
+                    speed: nodes.find(item => item.id === "sp-speed-trigger"),
+                    thinking: single.text ? [single.text] : [],
                   });
-                  if (tiers || thinking.length) {
+                  if (single.text) {
                     phase = "done";
                     send("\x04");
                   }
                 }
-                const menuOption = (thinking ? items : Array.isArray(tiers) ? tiers.map(record) : [])
-                  .find(item => item.label === (thinking ? "high" : "Standard"));
-                if (phase === "pick" && typeof menuOption?.id === "string") {
+                if (phase === "pick" && (thinking ? effort.max === 1 : typeof act === "string")) {
                   phase = "confirm";
-                  pickMenu(menuOption.id);
-                  pickMenu(menuOption.id);
-                } else if (phase === "reopen" && menuOption) {
-                  menuChecked = menuOption.checked;
+                  const pick = () => {
+                    if (thinking) event({ ev: "change", id: "sp-effort", value: 1 });
+                    else if (typeof act === "string") action(standard?.id, act);
+                  };
+                  pick(); pick();
+                } else if (phase === "reopen" && option.icon === "check") {
+                  confirmedTier = true;
                   phase = "done";
-                  send("\x04");
+                  if (scenario === "reload") {
+                    phase = "cancel";
+                    action("sp-close", "close");
+                  } else send("\x04");
+                } else if (phase === "confirm" && typeof notice === "string" && propsOf("sp-retry").text) {
+                  actualOutcome = notice.includes("fixture refused model") ? "refused"
+                    : notice.includes("confirm") ? "unconfirmed" : notice;
+                  if (scenario === "reload") {
+                    expect(modelTitle).toEndWith("Service tier: fast");
+                    phase = "reopen";
+                    action("sp-retry", "retry");
+                  } else if (scenario === "wrong model") {
+                    phase = "back";
+                    action("sp-back", "back");
+                  } else {
+                    phase = "done";
+                    send("\x04");
+                  }
                 }
               }
-              if (typeof id !== "string" || !id.startsWith("pick")) continue;
-              const option = items.find(item => item.label === (thinking ? "high" : "Standard"));
-              if (phase === "confirm" && verb === "del") {
+              if (phase === "confirm" && verb === "del" && !id.endsWith(".body")) {
                 actualOutcome = "selected";
                 if (thinking) { phase = "done"; send("\x04"); }
                 else { phase = "reopen"; open(); }
-              } else if (phase === "confirm" && props.state === "error") {
-                actualOutcome = String(props.message).includes("fixture refused model") ? "refused"
-                  : String(props.message).includes("confirm") ? "unconfirmed" : props.message;
-                if (scenario === "reload") {
-                  expect(modelTitle).toEndWith("Service tier: fast");
-                  phase = "reopen";
-                  event({ ev: "action", id, act: "retry" });
-                } else if (scenario === "wrong model") {
-                  phase = "back";
-                  event({ ev: "action", id, act: "back" });
-                } else {
-                  phase = "done";
-                  send("\x04");
-                }
-              } else if (phase === "reopen" && props.state === "ready" && option) {
-                reopened = { current: props.current, selected: props.selected, base: option.id };
-                if (scenario === "reload") {
-                  phase = "cancel";
-                  event({ ev: "action", id, act: "close" });
-                } else {
-                  phase = "done";
-                  send("\x04");
-                }
-              } else if (phase === "cancel" && verb === "del") {
+              } else if (phase === "cancel" && verb === "del" && !id.endsWith(".body")) {
                 phase = "done";
                 send("\x04");
               }
@@ -295,12 +355,7 @@ for (const { scenario, tier, outcome } of cases) {
         expect(calls.filter(call => call !== "read")).toEqual(["write"]);
         expect(draftText).toBe(draft);
         expect(actualOutcome).toBe(outcome);
-        if (!thinking && outcome === "selected") expect(menuChecked).toBe(true);
-        if (scenario === "reload") {
-          const { current, selected, base } = record(reopened);
-          expect(current).toEqual([base]);
-          expect(selected).toBe(base);
-        }
+        if (!thinking && (outcome === "selected" || scenario === "reload")) expect(confirmedTier).toBe(true);
         expect(modelTitle).toEndWith(`Service tier: ${tier}`);
         if (scenario === "wrong model") {
           expect(modelTitle).toContain("Model settings: other; Thinking: not reported;");
@@ -308,7 +363,7 @@ for (const { scenario, tier, outcome } of cases) {
             expect(menu.checked).toEqual([]);
             expect(menu.speed).toBeUndefined();
           }
-          expect(backMenus.at(-1)).toMatchObject({ heading: "Thinking: Not reported", thinking: ["off"] });
+          expect(backMenus.at(-1)).toMatchObject({ heading: "Effort not reported", thinking: ["Off"] });
           expect(calls).toEqual(["write", "read", "read"]);
         }
         if (thinking) {

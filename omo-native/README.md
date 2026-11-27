@@ -113,11 +113,11 @@ Click **Workflow** or press **Ctrl+G** to open a read-only split to the right of
 
 ### Choose model settings
 
-When the session is idle, open **Model settings** from the footer or press **Ctrl+S**. The button shows the session’s model, Thinking level, and any non-default speed. The picker opens on the current Thinking level and lists the levels the model supports.
+When the session is idle, open **Model settings** from the footer or press **Ctrl+S**. The button shows the session’s model, Thinking level, and any non-default speed. The popover opens above the button and shows the confirmed Thinking level. Move the stepped slider to choose a supported level, or use **←** and **→** and press **Enter** to apply.
 
-Click the **Model** row to browse models in the same picker. Type part of a model name, provider, or model ID to filter the list. Use **↑**, **↓**, or **Tab** to select a row, then press **Enter** to open it or apply a change. **Speed** appears only when OmO confirms switchable variants of the current model; the bolt marks Fast. Hover or click **Speed** to see the available tiers and the checked current tier, or press **Ctrl+S** again to enter Speed with the keyboard. **Back** returns to Thinking without applying a change. **Escape** or a click outside dismisses the picker.
+Click the model name to open a scrollable list in the same popover. Type part of a model name, provider, or model ID to filter the list. Click a model, or highlight it with **↑**, **↓**, or **Tab** and press **Enter**. **Speed** appears at the top left only when OmO confirms switchable variants; the bolt marks Fast. Hover or click it to see the available tiers and the checked current tier, or press **Ctrl+S** again to enter Speed with the keyboard. **Back** returns to Thinking without applying a change.
 
-**Escape** or **Cancel** dismisses a picker. Changes affect the current session, not the device default, and leave your draft unsent and intact. The footer reflects OmO's session state, not just what you selected; a dash means OmO did not report a value. An engine without session-scoped model switching shows an error instead.
+Press **Escape**, click **Close**, or click outside to dismiss the popover. Changes affect the current session, not the device default, and leave your draft and attachments intact and unsent. The footer reflects OmO's confirmed session state, not just what you selected. An engine without session-scoped model switching shows an error instead.
 
 When OmO reports current subscription quota for the account this session uses, a provider ring appears beside Model settings. The ring shows the remaining share of the most depleted reported base window. Its tooltip gives the window and both percentages. The ring stays hidden when a matching, current report isn't available.
 
