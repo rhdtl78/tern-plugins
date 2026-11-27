@@ -54,7 +54,8 @@ test("shows progress outside the composer and keeps engine exit in main", async 
       parent: "session-feedback", kind: "spinner", props: { hidden: phase === opening },
     });
     expect(views.get("model")?.props.hidden).not.toBe(true);
-    expect(views.get("model")?.props.text).toBe(phase === opening ? "OMO" : "FIXTURE MODEL");
+    expect(views.get("model-name")?.props.text).toBe(phase === opening ? "OMO" : "FIXTURE MODEL");
+    expect(views.get("model-effort")?.props.hidden).toBe(true);
     expect(views.get("stop")?.props.hidden).toBe(phase === opening);
     expect(withText(views, "ULW 실행 중")).toEqual([]);
   }

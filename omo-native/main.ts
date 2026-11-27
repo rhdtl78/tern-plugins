@@ -126,7 +126,9 @@ function refresh() {
     ["set", "attachments", { hidden: !!ask || !attachments.size }],
     ["set", "attachment-error", { hidden: !!ask || !reason, text: reason ?? "" }],
     ["set", "send", { hidden: !canSend && !ask?.typed }],
-    ["set", "model", { disabled: !canSend && !(picker instanceof SettingsPicker && !picker.applying) }],
+    ["set", "model", { attrs: {
+      "aria-disabled": String(!canSend && !(picker instanceof SettingsPicker && !picker.applying)),
+    } }],
     ["set", "stop", { hidden: !busy || !!ask || !!picker, disabled: stopping }],
     ["set", "session-status", { text: status, hidden: !status }],
     ["set", "session-activity", { hidden: !busy && !backgroundView?.active }],
