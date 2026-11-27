@@ -26,6 +26,11 @@ export class RpcTransportError extends Error {
   readonly name = "RpcTransportError";
 }
 
+/** Only this request expired; the owned connection can still serve other requests. */
+export class RpcRequestTimeoutError extends Error {
+  readonly name = "RpcRequestTimeoutError";
+}
+
 export class RpcCommandError extends Error {
   readonly name = "RpcCommandError";
   constructor(readonly command: string, readonly response: RpcRecord) {
@@ -174,7 +179,8 @@ export class OmoRpc {
         await this.#send({ type: "close_session", sessionId }, 12_000);
       } catch (error) {
         // Always tear down the owned process, even if OmO refuses graceful close.
-        if (!(error instanceof RpcCommandError || error instanceof RpcTransportError)) throw error;
+        if (!(error instanceof RpcCommandError || error instanceof RpcTransportError ||
+              error instanceof RpcRequestTimeoutError)) throw error;
       }
     }
     this.#child.stdin.end();
@@ -202,7 +208,7 @@ export class OmoRpc {
     const line = JSON.stringify({ ...request, id }) + "\n";
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        settle(new RpcTransportError(`OmO RPC timed out waiting for ${request.type}`));
+        settle(new RpcRequestTimeoutError(`OmO RPC timed out waiting for ${request.type}`));
       }, timeoutMs);
       const settle = (outcome: RpcRecord | Error) => {
         clearTimeout(timer);
