@@ -6,6 +6,7 @@ export const settingsPanelCss = `
   --sp-inset: calc(3 * var(--sp-unit));
   --sp-radius: calc(4 * var(--sp-unit));
   --sp-track: calc(6 * var(--sp-unit));
+  --sp-fill: calc(2 * var(--sp-unit));
   --sp-thumb: calc(7 * var(--sp-unit));
   --sp-tick: var(--sp-unit);
   --sp-title: 0.875rem;
@@ -107,6 +108,7 @@ export const settingsPanelCss = `
 [data-id="sp-speed-options"] > .sf-button .sf-btn-ic { order: 1; margin-left: auto; }
 [data-id="sp-speed-trigger"]:hover, [data-role="omo.settings-active"] { background: var(--l2); }
 [data-id="sp-effort"] {
+  isolation: isolate;
   margin-top: var(--sp-gap);
   margin-bottom: var(--sp-unit);
   min-width: 0;
@@ -115,6 +117,7 @@ export const settingsPanelCss = `
   display: none !important;
 }
 [data-id="sp-effort"] .sf-slider-track, [data-role="omo.effort-unknown"] {
+  position: relative;
   display: flex;
   align-items: center;
   padding: 0 calc(var(--sp-thumb) / 2);
@@ -124,14 +127,20 @@ export const settingsPanelCss = `
   border-radius: var(--sp-track);
 }
 [data-id="sp-effort"] .sf-slider-rail {
+  position: absolute;
+  inset: 0 calc(var(--sp-thumb) / 2);
   height: var(--sp-track);
-  width: 100%;
+  width: auto;
   margin: 0 !important;
   background: transparent;
-  position: relative;
-  top: calc(-1 * var(--sp-unit));
 }
-[data-id="sp-effort"] .sf-slider-fill { background: var(--accent); height: 100%; }
+[data-id="sp-effort"] .sf-slider-fill {
+  background: var(--accent);
+  top: 50%;
+  height: var(--sp-fill);
+  border-radius: 0;
+  transform: translateY(-50%);
+}
 [data-id="sp-effort"] .sf-slider-thumb {
   margin: 0 !important;
   top: 50% !important;
@@ -161,7 +170,13 @@ export const settingsPanelCss = `
 }
 [data-id="sp-effort-stops"] > .sf-button:first-child::after { left: 0; }
 [data-id="sp-effort-stops"] > .sf-button:last-child::after { left: 100%; }
-[data-id="sp-effort"] .sf-slider-ticks { top: 50%; transform: none; }
+[data-id="sp-effort"] .sf-slider-ticks {
+  position: absolute;
+  top: 50% !important;
+  margin: 0;
+  transform: none;
+}
+[data-id="sp-effort"] .sf-slider-tick { top: 0; margin: 0; }
 [data-id="sp-effort"] .sf-slider-tick, [data-id="sp-effort-stops"] > .sf-button::after {
   width: var(--sp-tick);
   height: var(--sp-tick);
