@@ -103,26 +103,45 @@ test.each([
   expect(blobs.map(blob => blob.mime)).toEqual(["image/webp"]);
 });
 
-test.each([
-  ["retries at full viewer resolution", 1_800_000, 4096],
-  ["falls back to a smaller rendition", 1_000_000, 2048],
-] as const)("#32 %s when the best rendition exceeds the published budget", async (_case, remaining, width) => {
+async function noisyJpeg() {
   const jpeg = await new Bun.Image(widePng(4097, undefined, "noise")).jpeg({ quality: 1 }).bytes();
-  const noisy = block(Buffer.from(jpeg).toString("base64"), "image/jpeg");
-  const ordinary = widePng(128, 900_000);
+  return block(Buffer.from(jpeg).toString("base64"), "image/jpeg");
+}
+
+test.each([
+  [1_800_000, 4096, true],
+  [1_600_000, 4096, false],
+  [1_000_000, 3072, false],
+] as const)("#32 with %i published bytes left, retains at least %ipx", async (remaining, minWidth, checkOrdinary) => {
   const first = widePng(128, attachmentLimit - remaining);
-  const later = block(blue);
   // This compliant neighbor fits the source budget but not the published
   // budget after the full-resolution rendition. A tiny neighbor still fits.
-  const neighbors = width === 4096 ? [block(ordinary.toString("base64")), later] : [later];
-  const { blobs, views } = await resolveImages([block(first.toString("base64")), noisy, ...neighbors]);
+  const ordinary = checkOrdinary ? [block(widePng(128, 900_000).toString("base64"))] : [];
+  const { blobs, views } = await resolveImages([block(first.toString("base64")), await noisyJpeg(), ...ordinary, block(blue)]);
   expect(blobs.map(blob => blob.mime)).toEqual(["image/png", "image/webp", "image/png"]);
   const rendition = blobs.find(blob => blob.mime === "image/webp");
   if (!rendition) throw new Error("Expected a viewer rendition");
-  expect((await new Bun.Image(rendition.bytes).metadata()).width).toBe(width);
+  const { width } = await new Bun.Image(rendition.bytes).metadata();
+  expect(width).toBeGreaterThanOrEqual(minWidth);
+  expect(width).toBeLessThanOrEqual(4096);
+  expect(views[1]?.blob).toBe(rendition.id);
   expect(blobs.reduce((total, blob) => total + blob.bytes.length, 0)).toBeLessThanOrEqual(attachmentLimit);
-  if (width === 4096) expect(views[2]?.text).toBe("Image 3 unavailable");
+  if (checkOrdinary) expect(views[2]?.text).toBe("Image 3 unavailable");
   expect(views.at(-1)?.blob).toBe(blobIds[1]);
+});
+
+test("#32 opens a third noisy JPEG without shrinking the first two", async () => {
+  const jpeg = await noisyJpeg();
+  const { blobs, views } = await resolveImages([jpeg, jpeg, jpeg]);
+  expect(views.map(view => view?.alt ?? view?.text)).toEqual(
+    ["Image 1 (resized)", "Image 2 (resized)", "Image 3 (resized)"],
+  );
+  expect(views.map(view => view?.blob)).toEqual(blobs.map(blob => blob.id));
+  const widths = await Promise.all(blobs.map(async blob => (await new Bun.Image(blob.bytes).metadata()).width));
+  expect(widths.slice(0, 2)).toEqual([4096, 4096]);
+  expect(widths[2]).toBeGreaterThanOrEqual(1500);
+  expect(widths[2]).toBeLessThanOrEqual(4096);
+  expect(blobs.reduce((total, blob) => total + blob.bytes.length, 0)).toBeLessThanOrEqual(attachmentLimit);
 });
 
 test("#32 displays two real clipboard images in send order after OmO acknowledges the prompt", async () => {

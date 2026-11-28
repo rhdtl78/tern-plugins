@@ -12,7 +12,8 @@ type PendingImage = {
 };
 const unavailable = (id: string, label: string) => node(id, "text", { text: `${label} unavailable` });
 const viewerSide = 4096;
-const renditionAttempts = [[viewerSide, 80], [viewerSide, 50], [2048, 50]] as const;
+const fullSizeQualities = [80, 50, 45] as const;
+const resizedProbes = 4;
 
 async function displayImage({ mime, data, size }: PendingImage, remaining: number, active: () => boolean) {
   if (typeof Bun.Image !== "function") return;
@@ -21,12 +22,25 @@ async function displayImage({ mime, data, size }: PendingImage, remaining: numbe
   const source = new Bun.Image(bytes);
   const { width, height, format } = await source.metadata();
   if (!active() || `image/${format}` !== mime || !width || !height || width * height > previewPixelLimit) return;
-  if (Math.max(width, height) > viewerSide) {
+  const longSide = Math.max(width, height);
+  if (longSide > viewerSide) {
+    const aspect = Math.min(width, height) / longSide;
+    let side = viewerSide;
     // Prefer the viewer's full resolution; only trade pixels for bytes after a quality retry.
-    for (const [side, quality] of renditionAttempts) {
+    for (let attempt = 0; attempt < fullSizeQualities.length + resizedProbes; attempt++) {
       if (!active()) return;
+      const quality = fullSizeQualities[attempt] ?? fullSizeQualities[2];
       const reduced = await new Bun.Image(bytes).resize(side, side, { fit: "inside" }).webp({ quality }).bytes();
       if (reduced.length <= remaining) return { mime: "image/webp", bytes: reduced, resized: true };
+      if (attempt < fullSizeQualities.length - 1) continue;
+      if (side === 1) break;
+      const ratio = remaining / reduced.length;
+      const shortSide = Math.max(1, Math.round(side * aspect));
+      // Area scaling becomes linear at a one-pixel short edge. Encoded bytes
+      // need not follow area, so temper the first large cut and remeasure.
+      const scale = Math.min(Math.sqrt(ratio), ratio * shortSide);
+      const next = side === viewerSide ? Math.max(0.4, 0.98 * scale) : 0.98 * scale;
+      side = Math.max(1, Math.floor(side * next));
     }
     return;
   }
