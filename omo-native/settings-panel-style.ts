@@ -6,7 +6,6 @@ export const settingsPanelCss = `
   --sp-inset: calc(3 * var(--sp-unit));
   --sp-radius: calc(4 * var(--sp-unit));
   --sp-track: calc(6 * var(--sp-unit));
-  --sp-fill: calc(2 * var(--sp-unit));
   --sp-thumb: calc(7 * var(--sp-unit));
   --sp-tick: var(--sp-unit);
   --sp-title: 0.875rem;
@@ -135,11 +134,18 @@ export const settingsPanelCss = `
   background: transparent;
 }
 [data-id="sp-effort"] .sf-slider-fill {
+  background: transparent;
+  top: 0;
+  height: 100%;
+  overflow: visible;
+}
+[data-id="sp-effort"] .sf-slider-fill::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 calc(-1 * var(--sp-thumb) / 2);
   background: var(--accent);
-  top: 50%;
-  height: var(--sp-fill);
-  border-radius: 0;
-  transform: translateY(-50%);
+  border-radius: calc(var(--sp-track) / 2) 0 0 calc(var(--sp-track) / 2);
+  pointer-events: none;
 }
 [data-id="sp-effort"] .sf-slider-thumb {
   margin: 0 !important;
