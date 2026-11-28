@@ -2,7 +2,7 @@ export const model = "Fixture model";
 export const warning = "Hot-reloaded: fixture/omo.jsonc";
 export const refusal = "fixture refused startup";
 
-export type Scenario = "notice" | "composer" | "queue" | "clipboard" | "ulw" | "session" | "session-refused";
+export type Scenario = "notice" | "composer" | "queue" | "clipboard" | "ulw" | "session" | "session-refused" | "images";
 export const promptsFile = "prompts.jsonl";
 export const sessionCallsFile = "session-calls.jsonl";
 export const sessionPending = "Fixture session command pending";
@@ -101,6 +101,13 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (type === "get_messages") send({ type: "extension_ui_request", method: "notify",
     notifyType: "warning", message: ${JSON.stringify(warning)} });
   if (type === "prompt") {
+    if (${scenario === "images"}) {
+      send({ type: "agent_start" });
+      send({ type: "message_end", message: { role: "user",
+        content: [{ type: "text", text: fields.message }, ...(fields.images ?? [])] } });
+      send({ type: "agent_settled" });
+      continue;
+    }
     if (!composer && ++prompts === 2) process.exit(7);
     if (${scenario === "ulw"}) send({ type: "message_start",
       message: { role: "custom", customType: "omo-ultrawork:directive", display: false } });

@@ -14,6 +14,9 @@ export const attachmentCount = 6;
 export type Image = { type: "image"; mimeType: string; data: string };
 export type Attachment = { name: string; label: string; size?: number; reason?: string; image?: Image; preview?: Buffer };
 
+export const imageMimes = new Set(mimes.values());
+export const previewPixelLimit = 16_000_000;
+
 function details(path: string) {
   const name = plain(basename(path)).replace(/[\n\r\t\u202a-\u202e\u2066-\u2069]/g, " ").trim() || "Unnamed file";
   const ext = extname(name).slice(1).toUpperCase();
@@ -30,7 +33,7 @@ async function image(file: Attachment, mimeType: string, bytes: Buffer, previews
     const source = new Bun.Image(bytes);
     const { width, height, format } = await source.metadata();
     if (`image/${format}` !== mimeType) return { ...file, reason: "The image data does not match its file type." };
-    if (width * height > 16_000_000) return { ...file, reason: "The image exceeds the 16 megapixel preview limit." };
+    if (width * height > previewPixelLimit) return { ...file, reason: "The image exceeds the 16 megapixel preview limit." };
     const preview = Buffer.from(await source.resize(64, 64, { fit: "inside" }).png().bytes());
     return { ...file, preview, image: { type: "image", mimeType, data: bytes.toString("base64") } };
   } catch {

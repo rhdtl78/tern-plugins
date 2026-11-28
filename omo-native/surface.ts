@@ -35,6 +35,17 @@ export class Surface {
   send(verb: string, value: unknown) {
     for (const part of packets(verb, value, this.#limit)) process.stdout.write(part);
   }
+  blob(mime: string, bytes: Uint8Array): string {
+    const id = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+    for (let i = 0; i < data.length; i += this.#limit) {
+      const type = i === 0 ? `mime=${mime};` : "";
+      const more = i + this.#limit < data.length;
+      const chunk = data.length > this.#limit ? `c=blob;${more ? "m=1;" : ""}` : "";
+      process.stdout.write(`\x1b_tsp;b;${type}${chunk}${data.slice(i, i + this.#limit)}\x1b\\`);
+    }
+    return id;
+  }
   ack(s: unknown) {
     if (typeof s === "number" && s <= this.#s) this.#ack = Math.max(this.#ack, s);
     this.#flush();

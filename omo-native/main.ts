@@ -97,11 +97,7 @@ async function paste(mime: string, bytes: Buffer) {
     for (const file of files) {
       const id = `attachment${++seq}`;
       attachments.set(id, file);
-      let blob: string | undefined;
-      if (file.preview) {
-        blob = new Bun.CryptoHasher("sha256").update(file.preview).digest("hex");
-        process.stdout.write(`\x1b_tsp;b;mime=image/png;${file.preview.toString("base64")}\x1b\\`);
-      }
+      const blob = file.preview && screen.blob("image/png", file.preview);
       frame(attachmentCard(id, file, blob));
     }
   } finally {
@@ -194,6 +190,7 @@ async function close() {
   quickTitle?.invalidate();
   sessionTitle.close();
   closing = true; settings.invalidate(); terminal.closing(); unsubscribe?.();
+  transcript?.retire();
   cancelPaste(); input.expireClipboardFrame();
   quota?.close();
   workflow.disconnect();
@@ -297,7 +294,7 @@ function makeTranscript() {
     for (const [verb, id, parent] of ops)
       if (verb === "add" && parent === "main" && typeof id === "string") transcriptNodes.add(id);
     frame(...ops);
-  }, phases => workflow.todo(phases), authorIcon);
+  }, phases => workflow.todo(phases), authorIcon, previews ? (mime, bytes) => screen.blob(mime, bytes) : undefined);
 }
 async function start(hello: RpcRecord) {
   live = true; screen.negotiate(hello);
@@ -308,9 +305,7 @@ async function start(hello: RpcRecord) {
   previews = Array.isArray(hello.features) && hello.features.includes("blobs") &&
     Array.isArray(hello.kinds) && hello.kinds.includes("image");
   if (previews) {
-    const bytes = Buffer.from(omoIcon);
-    authorIcon = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-    process.stdout.write(`\x1b_tsp;b;mime=image/svg+xml;${bytes.toString("base64")}\x1b\\`);
+    authorIcon = screen.blob("image/svg+xml", Buffer.from(omoIcon));
   }
   transcript = makeTranscript();
   screen.send("s", { sf: surface, name: "omo-composer", css: `
@@ -416,6 +411,7 @@ async function reloadSession(client: OmoRpc, text: string, replaced: boolean) {
   const titleRevision = sessionTitle.revision;
   const state = await client.getState(), history = await client.getMessages();
   if (closing || !ready || !client.sessionId) return;
+  transcript.retire();
   frame(...[...transcriptNodes].map(id => ["del", id]));
   transcriptNodes.clear();
   if (!welcome) frame(add("main", welcomeCard()));

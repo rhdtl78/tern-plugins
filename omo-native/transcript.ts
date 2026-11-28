@@ -1,5 +1,6 @@
 import type { RpcRecord } from "./rpc";
 import { evalCard } from "./eval-card";
+import { sentMessage } from "./sent-images";
 import { add, node, plain, record, string, type Op } from "./surface";
 
 function body(content: unknown): string {
@@ -64,11 +65,15 @@ export class Transcript {
   #blocks = new Map<number, string>();
   #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; bodyId: string }>();
   #folds = new Map<string, boolean>();
+  #active = true;
+  #images = Promise.resolve();
   constructor(private readonly frame: (...ops: Op[]) => void,
     private readonly onTodo?: (phases: readonly ChecklistPhase[]) => void,
-    private readonly authorIcon?: string) {}
+    private readonly authorIcon?: string,
+    private readonly publishImage?: (mime: string, bytes: Uint8Array) => string) {}
   #seenTodo = new Set<string>();
   get populated() { return this.#seq !== 0; }
+  retire() { this.#active = false; }
 
   fold(id: string, collapsed: boolean) { if (this.#folds.has(id)) this.#folds.set(id, collapsed); }
   flipTools() {
@@ -126,27 +131,36 @@ export class Transcript {
       }
     }
   }
-  #text(text: string, assistant: boolean) {
+  #text(text: string) {
     if (!text) return;
-    if (assistant && this.#assistant) {
+    if (this.#assistant) {
       this.frame(["text", this.#assistant + ".body", "replace", text]);
       return;
     }
     const id = `m${++this.#seq}`;
-    if (assistant) this.#assistant = id;
-    const avatar = assistant && this.authorIcon ? node(id + ".author", "image", {
+    this.#assistant = id;
+    const avatar = this.authorIcon ? node(id + ".author", "image", {
       blob: this.authorIcon, alt: "OMO", actions: { click: "ignore" },
     }) : undefined;
     this.frame(add("main", node(id, "message", {
-      side: assistant ? "start" : "end", variant: "auto",
-      ...(avatar ? { avatar: avatar.id } : { author: assistant ? "OMO" : "You" }),
-    }, [...(avatar ? [avatar] : []), node(id + ".body", assistant ? "md" : "text", { text })])));
+      side: "start", variant: "auto",
+      ...(avatar ? { avatar: avatar.id } : { author: "OMO" }),
+    }, [...(avatar ? [avatar] : []), node(id + ".body", "md", { text })])));
   }
   message(m: RpcRecord) {
     switch (m.role) {
-      case "user": this.#text(body(m.content), false); break;
+      case "user": {
+        const message = sentMessage(`m${this.#seq + 1}`, m.content, this.publishImage);
+        if (message) {
+          this.#seq++;
+          this.frame(add("main", message.view));
+          const resolve = message.resolve;
+          if (resolve) this.#images = this.#images.then(() => resolve(this.frame, () => this.#active));
+        }
+        break;
+      }
       case "assistant": {
-        this.#text(body(m.content) || plain(string(m.errorMessage)), true);
+        this.#text(body(m.content) || plain(string(m.errorMessage)));
         if (Array.isArray(m.content)) for (const b of m.content.map(record)) {
           if (b.type === "toolCall") this.#tool(string(b.id), string(b.name), { args: record(b.arguments), status: "pending" });
         }
@@ -165,7 +179,7 @@ export class Transcript {
         const sep = this.#blocks.size && !this.#blocks.has(b.contentIndex) ? "\n\n" : "";
         this.#blocks.set(b.contentIndex, "");
         if (this.#assistant) this.frame(["text", this.#assistant + ".body", "append", sep + part]);
-        else this.#text(part, true);
+        else this.#text(part);
         break;
       }
       case "message_end": this.message(record(e.message)); break;

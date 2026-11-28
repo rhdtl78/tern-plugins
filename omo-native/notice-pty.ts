@@ -73,7 +73,10 @@ export async function exercise(rejectOpen: boolean, observe: (views: Views, cont
         while ((end = buffer.indexOf("\x1b\\")) !== -1) {
           const message = buffer.slice(0, end);
           const packet = message.split("\x1b_tsp;f;")[1];
-          if (message.includes("\x1b_tsp;q;")) send('\x1b_tsp;r;{"r":"hello","v":1,"credits":200}\x1b\\');
+          if (message.includes("\x1b_tsp;q;")) {
+            const imageSupport = scenario === "images" ? ',"features":["blobs"],"kinds":["image"]' : "";
+            send(`\x1b_tsp;r;{"r":"hello","v":1,"credits":200${imageSupport}}\x1b\\`);
+          }
           buffer = buffer.slice(end + 2);
           const clipboardReadId = /\x1b\]5522;type=read:id=([^:;]+):/.exec(message)?.[1];
           if (clipboardReadId && observe(views, { ...controls, clipboardReadId }, [])) send("\x04");
