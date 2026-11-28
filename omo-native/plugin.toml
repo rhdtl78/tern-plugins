@@ -1,7 +1,7 @@
 schema = 1
 id = "omo-native"
 name = "OMO Native"
-version = "0.2.1"
+version = "0.2.2"
 description = "Launch OMO sessions as native inline surfaces in Tern."
 window = "window.luau"
 host = "host.luau"
