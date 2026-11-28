@@ -20,28 +20,41 @@ export type ChecklistPhase = {
   readonly items: readonly ChecklistItem[];
 };
 
-export function todoPhases(details: unknown): readonly ChecklistPhase[] | undefined {
+function projectTodo(details: unknown) {
   const { phases } = record(details);
   if (!Array.isArray(phases)) return;
-  const checklist: ChecklistPhase[] = [];
+  const transcript: ChecklistPhase[] = [];
+  const workflow: ChecklistPhase[] = [];
   for (const phase of phases) {
     const { name, tasks } = record(phase);
     const title = plain(string(name));
     if (!title.trim() || !Array.isArray(tasks)) return;
     if (!tasks.length) continue;
     const items: ChecklistItem[] = [];
+    const current: ChecklistItem[] = [];
     for (const task of tasks) {
       const { content, status } = record(task);
       const text = plain(string(content));
+      const id = `${transcript.length}:${items.length}`;
+      if (!text.trim()) return;
+      if (status === "abandoned") {
+        // Tern has no dropped state. An unchecked, labeled row is not counted as done.
+        items.push({ id, text: `${text} (dropped)`, status: "pending" });
+        continue;
+      }
       const state = status === "in_progress" ? "active" : status === "completed" ? "done"
         : status === "pending" ? "pending" : undefined;
-      if (!text.trim() || !state) return;
-      items.push({ id: `${checklist.length}:${items.length}`, text, status: state });
+      if (!state) return;
+      const item: ChecklistItem = { id, text, status: state };
+      items.push(item);
+      current.push(item);
     }
     // Tern otherwise folds completed phases. A manual fold takes precedence by phase ID.
-    checklist.push({ id: String(checklist.length), title, collapsed: false, items });
+    const frame = { id: String(transcript.length), title, collapsed: false } as const;
+    transcript.push({ ...frame, items });
+    if (current.length) workflow.push({ ...frame, items: current });
   }
-  return checklist;
+  return { transcript, workflow };
 }
 
 /** History and live tool events share one identity per call, including its disclosure. */
@@ -49,7 +62,7 @@ export class Transcript {
   #seq = 0;
   #assistant = "";
   #blocks = new Map<number, string>();
-  #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; checklist: boolean }>();
+  #tools = new Map<string, { readonly id: string; readonly name: string; args: RpcRecord; bodyId: string }>();
   #folds = new Map<string, boolean>();
   constructor(private readonly frame: (...ops: Op[]) => void,
     private readonly onTodo?: (phases: readonly ChecklistPhase[]) => void,
@@ -75,18 +88,20 @@ export class Transcript {
     const args = { ...tool?.args, ...input.args };
     const collapsed = kind !== "mcp" && kind !== "todo";
     const bodyId = kind === "mcp" || kind === "todo" || kind === "eval" ? `${id}.scroll` : id;
-    const phases = kind === "todo" && status === "done" ? todoPhases(result?.details) : undefined;
-    if (phases && !this.#seenTodo.has(call)) {
+    const todo = kind === "todo" && status === "done" ? projectTodo(result?.details) : undefined;
+    if (todo && !this.#seenTodo.has(call)) {
       this.#seenTodo.add(call);
-      this.onTodo?.(phases);
+      this.onTodo?.(todo.workflow);
     }
     const raw = body(result?.content);
     const evaluation = kind === "eval" ? evalCard(id, args, { status, details: result?.details, output: raw }) : undefined;
-    const output = evaluation?.body ?? (phases?.length
-      ? node(id + ".todo", "checklist", { mode: "full", phases })
-      : node(id + ".out", "code", { lang: "text", text: raw }));
+    const output = evaluation?.body ?? (todo === undefined
+      ? node(id + ".out", "code", { lang: "text", text: raw })
+      : todo.transcript.length
+        ? node(id + ".todo", "checklist", { mode: "full", phases: todo.transcript })
+        : node(id + ".empty", "text", { text: "No current Todo." }));
     if (!tool) {
-      this.#tools.set(call, { id, name, args, checklist: !!phases?.length });
+      this.#tools.set(call, { id, name, args, bodyId: output.id });
       this.#folds.set(id, collapsed);
       const target = plain(string(args.path) || string(args.command) || string(args.query));
       this.frame(add("main", node(id, "tool", {
@@ -101,11 +116,11 @@ export class Transcript {
       }
       this.frame(["set", id, { status }]);
       if (!result) return;
-      if (tool.checklist !== !!phases?.length) {
-        this.frame(["del", id + (tool.checklist ? ".todo" : ".out")], add(bodyId, output));
-        tool.checklist = !!phases?.length;
-      } else if (phases?.length) {
-        this.frame(["set", output.id, { phases }]);
+      if (tool.bodyId !== output.id) {
+        this.frame(["del", tool.bodyId], add(bodyId, output));
+        tool.bodyId = output.id;
+      } else if (todo?.transcript.length) {
+        this.frame(["set", output.id, { phases: todo.transcript }]);
       } else {
         this.frame(["text", output.id, "replace", output.p.text]);
       }

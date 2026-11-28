@@ -211,12 +211,16 @@ const todoDetails = {
   ],
 };
 
-test.each(["live", "restored"] as const)("%s Todo displays all phases and statuses inside the original tool card", (source) => {
+test.each(["live", "restored"] as const)("%s Todo labels dropped tasks in the card but omits them from Workflow", (source) => {
   const ops: Op[] = [];
-  const t = new Transcript((...o) => ops.push(...o));
+  const panel: unknown[] = [];
+  const t = new Transcript((...o) => ops.push(...o), phases => panel.push(phases));
   t.message({ role: "assistant", content: [{ type: "toolCall", id: "call", name: "todo" }] });
   t.fold("t1", false);
-  const result = { content: [{ type: "text", text: "Raw status" }], details: todoDetails };
+  const result = { content: [{ type: "text", text: "Raw status" }], details: {
+    phases: [...todoDetails.phases, { name: "Obsolete", tasks: [{ content: "Skip old release", status: "abandoned" }] }],
+  } };
+  const sourceBytes = JSON.stringify(result);
   if (source === "live") t.event({ type: "tool_execution_end", toolCallId: "call", toolName: "todo", result });
   else t.message({ role: "toolResult", toolCallId: "call", toolName: "todo", ...result });
 
@@ -229,21 +233,71 @@ test.each(["live", "restored"] as const)("%s Todo displays all phases and status
         { text: "Review output", status: "active" },
       ] },
       { title: "Release", collapsed: false, items: [{ text: "Publish report", status: "pending" }] },
+      { title: "Obsolete", collapsed: false, items: [{ text: "Skip old release (dropped)", status: "pending" }] },
     ] },
   });
+  expect(panel).toHaveLength(1);
+  expect(panel[0]).toMatchObject([
+    { title: "Validation", items: [{ text: "Check input", status: "done" }, { text: "Review output", status: "active" }] },
+    { title: "Release", items: [{ text: "Publish report", status: "pending" }] },
+  ]);
+  expect(JSON.stringify(result)).toBe(sourceBytes);
   t.flipTools();
   expect(ops.at(-1)).toEqual(["set", "t1", { collapsed: true }]);
+});
+
+test.each(["live", "restored"] as const)("%s all-dropped Todo keeps a checklist and clears Workflow", (source) => {
+  const ops: Op[] = [];
+  const panelSizes: number[] = [];
+  const t = new Transcript((...o) => ops.push(...o), phases => panelSizes.push(phases.length));
+  t.message({ role: "toolResult", toolCallId: "prior", toolName: "todo", details: todoDetails });
+  ops.length = 0;
+  const result = {
+    content: [{ type: "text", text: "Overall: 2/2 done" }],
+    details: { phases: [{ name: "Release", tasks: [
+      { content: "Publish report", status: "abandoned" }, { content: "Notify team", status: "abandoned" },
+    ] }] },
+  };
+  if (source === "live") t.event({ type: "tool_execution_end", toolCallId: "drop", toolName: "todo", result });
+  else t.message({ role: "toolResult", toolCallId: "drop", toolName: "todo", ...result });
+
+  expect(ops[0]?.[4]).toMatchObject({ c: [{ k: "scroll", c: [{ k: "checklist", p: { phases: [
+    { title: "Release", items: [
+      { text: "Publish report (dropped)", status: "pending" }, { text: "Notify team (dropped)", status: "pending" },
+    ] },
+  ] } }] }] });
+  expect(panelSizes).toEqual([2, 0]);
+});
+
+test("a valid empty Todo replaces the pending code body and clears Workflow", () => {
+  const ops: Op[] = [];
+  const panelSizes: number[] = [];
+  const t = new Transcript((...o) => ops.push(...o), phases => panelSizes.push(phases.length));
+  t.message({ role: "toolResult", toolCallId: "prior", toolName: "todo", details: todoDetails });
+  t.event({ type: "tool_execution_start", toolCallId: "clear", toolName: "todo" });
+  ops.length = 0;
+  t.event({ type: "tool_execution_end", toolCallId: "clear", toolName: "todo", result: {
+    content: [{ type: "text", text: "Ask: Original request\nNow: none" }], details: { phases: [] },
+  } });
+
+  expect(ops).toContainEqual(["del", "t2.out"]);
+  expect(ops.find(o => o[0] === "add" && o[2] === "t2.scroll")?.[4]).toMatchObject({
+    k: "text", p: { text: "No current Todo." },
+  });
+  expect(panelSizes).toEqual([2, 0]);
 });
 
 test.each([
   ["legacy", "todo", false, undefined],
   ["malformed", "todo", false, { phases: [...todoDetails.phases, { name: "Broken", tasks: [{}] }] }],
   ["unknown status", "todo", false, { phases: [{ name: "Check", tasks: [{ content: "Task", status: "active" }] }] }],
+  ["malformed dropped item", "todo", false, { phases: [{ name: "Check", tasks: [{ content: " ", status: "abandoned" }] }] }],
   ["failed", "todo", true, todoDetails],
   ["different tool", "read", false, todoDetails],
 ] as const)("%s result retains the literal code body", (_label, toolName, isError, details) => {
   const ops: Op[] = [];
-  const t = new Transcript((...o) => ops.push(...o));
+  const panel: unknown[] = [];
+  const t = new Transcript((...o) => ops.push(...o), phases => panel.push(phases));
   t.message({ role: "toolResult", toolCallId: "call", toolName, isError, details,
     content: [{ type: "text", text: "**Raw status**" }] });
   const literal = { k: "code", p: { text: "**Raw status**" } };
@@ -251,6 +305,7 @@ test.each([
     k: "tool", p: { status: isError ? "error" : "done" },
     c: toolName === "todo" ? [{ k: "scroll", c: [literal] }] : [literal],
   });
+  expect(panel).toEqual([]);
 });
 
 test("permission and question answers bind to the displayed option, never to plain Enter", () => {
