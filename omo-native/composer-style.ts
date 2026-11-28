@@ -44,7 +44,7 @@ export const composerCss = `
       left: 22px;
       pointer-events: none;
     }
-    .sf-col[data-id="dock"]:has([data-id^="pending."]) .sf-row[data-id="session-feedback"] {
+    .sf-scroll[data-id="pending-messages"]:not(.sf-hidden) + .sf-col[data-id="composer"] > .sf-row[data-id="session-feedback"] {
       position: static;
     }
     .sf-scroll[data-id="pending-messages"] {
