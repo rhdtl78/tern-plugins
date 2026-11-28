@@ -3,30 +3,44 @@ import { attachmentLimit } from "./clipboard";
 import { node, plain, record, string, type Op } from "./surface";
 
 type BlobWriter = (mime: string, bytes: Uint8Array) => string;
+type PendingImage = {
+  readonly id: string;
+  readonly label: string;
+  readonly mime: string;
+  readonly data: string;
+  readonly size: number;
+};
 const unavailable = (id: string, label: string) => node(id, "text", { text: `${label} unavailable` });
+const viewerSide = 4096;
+const renditionAttempts = [[viewerSide, 80], [viewerSide, 50], [2048, 50]] as const;
 
-async function displayImage(mime: string, data: string) {
+async function displayImage({ mime, data, size }: PendingImage, remaining: number, active: () => boolean) {
   if (typeof Bun.Image !== "function") return;
   const bytes = Buffer.from(data, "base64");
   if (bytes.toString("base64") !== data) return;
   const source = new Bun.Image(bytes);
   const { width, height, format } = await source.metadata();
-  if (`image/${format}` !== mime || !width || !height || width * height > previewPixelLimit) return;
-  // Decode before handing a blob to Tern. Use a bounded rendition above the renderer's side limit.
-  if (Math.max(width, height) > 4096) {
-    const reduced = await source.resize(2048, 2048, { fit: "inside" }).webp().bytes();
-    if (reduced.length <= attachmentLimit) return { mime: "image/webp", bytes: reduced };
+  if (!active() || `image/${format}` !== mime || !width || !height || width * height > previewPixelLimit) return;
+  if (Math.max(width, height) > viewerSide) {
+    // Prefer the viewer's full resolution; only trade pixels for bytes after a quality retry.
+    for (const [side, quality] of renditionAttempts) {
+      if (!active()) return;
+      const reduced = await new Bun.Image(bytes).resize(side, side, { fit: "inside" }).webp({ quality }).bytes();
+      if (reduced.length <= remaining) return { mime: "image/webp", bytes: reduced, resized: true };
+    }
     return;
   }
+  if (size > remaining) return;
+  // Verify decoding, but preserve the original for images the viewer can already show.
   await source.resize(64, 64, { fit: "inside" }).png().bytes();
-  return { mime, bytes };
+  return { mime, bytes, resized: false };
 }
 
 export function sentMessage(id: string, content: unknown, publish?: BlobWriter) {
   const blocks: readonly unknown[] = Array.isArray(content) ? content : [{ type: "text", text: content }];
   const children: ReturnType<typeof node>[] = [];
-  const pending: { readonly id: string; readonly label: string; readonly mime: string; readonly data: string }[] = [];
-  let imageNumber = 0, remaining = attachmentLimit;
+  const pending: PendingImage[] = [];
+  let imageNumber = 0;
   const paragraphs: string[] = [];
   const flushText = () => {
     const text = paragraphs.join("\n\n");
@@ -44,32 +58,41 @@ export function sentMessage(id: string, content: unknown, publish?: BlobWriter) 
     const mime = string(block.mimeType), data = string(block.data);
     const size = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
     if (!publish || index > attachmentCount || !imageMimes.has(mime) || !data.length ||
-        data.length % 4 !== 0 || size > remaining) {
+        data.length % 4 !== 0 || size > attachmentLimit) {
       children.push(unavailable(imageId, label));
       continue;
     }
-    remaining -= size;
     children.push(node(`${imageId}.pending`, "text", { text: `Loading ${label.toLowerCase()}…` }));
-    pending.push({ id: imageId, label, mime, data });
+    pending.push({ id: imageId, label, mime, data, size });
   }
   flushText();
   if (!children.length) return;
   return {
     view: node(id, "message", { side: "end", variant: "auto", author: "You" }, children),
     resolve: publish && pending.length ? async (frame: (...ops: Op[]) => void, active: () => boolean) => {
+      let sourceRemaining = attachmentLimit, publishedRemaining = attachmentLimit;
       for (const item of pending) {
         if (!active()) return;
         let blob: string | undefined;
+        let alt = item.label;
         try {
-          const image = await displayImage(item.mime, item.data);
-          if (image && active()) blob = publish(image.mime, image.bytes);
+          if (item.size <= sourceRemaining && publishedRemaining > 0) {
+            const image = await displayImage(item, publishedRemaining, active);
+            if (image && active()) {
+              blob = publish(image.mime, image.bytes);
+              // A validated original and its emitted rendition spend separate budgets.
+              sourceRemaining -= item.size;
+              publishedRemaining -= image.bytes.length;
+              if (image.resized) alt = `${item.label} (resized)`;
+            }
+          }
         } catch {
           // Decode and blob I/O failures must not reject the queue for later images.
         }
         if (!active()) return;
         // No custom click handler: the host's native viewer opens this blob.
         const child = blob === undefined ? unavailable(item.id, item.label)
-          : node(item.id, "image", { blob, alt: item.label, max: { h: "5lines" } });
+          : node(item.id, "image", { blob, alt, max: { h: "5lines" } });
         const placeholder = `${item.id}.pending`;
         frame(["add", child.id, id, placeholder, child], ["del", placeholder]);
       }

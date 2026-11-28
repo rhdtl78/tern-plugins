@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { deflateSync } from "node:zlib";
 import { attachmentLimit } from "./clipboard";
 import { exercise, withText } from "./notice-pty";
 import { sentMessage } from "./sent-images";
@@ -12,6 +13,117 @@ const blobIds = [red, blue].map(data => digest(Buffer.from(data, "base64")));
 const block = (data: string, mimeType = "image/png") => ({ type: "image", mimeType, data });
 const osc = (fields: string) => `\x1b]5522;type=read:${fields}\x1b\\`;
 const b64 = (text: string) => Buffer.from(text).toString("base64");
+
+function pngChunk(type: string, data: Uint8Array) {
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length);
+  chunk.write(type, 4, 4, "ascii");
+  chunk.set(data, 8);
+  chunk.writeUInt32BE(Bun.hash.crc32(chunk.subarray(4, -4)), chunk.length - 4);
+  return chunk;
+}
+
+function widePng(width: number, padTo?: number, pattern: "stripes" | "inverted" | "noise" = "stripes") {
+  const header = Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0]);
+  header.writeUInt32BE(width);
+  header.writeUInt32BE(900, 4);
+  const row = Buffer.alloc(width + 1);
+  const pixels = Buffer.alloc(row.length * 900);
+  if (pattern === "noise") {
+    let state = 17;
+    for (let y = 0; y < 900; y++) for (let x = 1; x <= width; x++) {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      pixels[y * row.length + x] = state >>> 24;
+    }
+  } else {
+    for (let x = 0; x < width; x++) row[x + 1] = (x % 16 < 8) !== (pattern === "inverted") ? 255 : 0;
+    pixels.fill(row);
+  }
+  const chunks = [
+    Buffer.from("89504e470d0a1a0a", "hex"), pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)), pngChunk("IEND", Buffer.alloc(0)),
+  ];
+  if (padTo !== undefined) {
+    const padding = Buffer.alloc(padTo - chunks.reduce((sum, chunk) => sum + chunk.length, 0) - 12, 65);
+    padding.write("note\0");
+    chunks.splice(-1, 0, pngChunk("tEXt", padding));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function resolveImages(blocks: readonly ReturnType<typeof block>[], failFirst = false) {
+  const blobs: { readonly mime: string; readonly bytes: Uint8Array; readonly id: string }[] = [];
+  const views = new Map<string, ReturnType<typeof record>>();
+  let failed = false;
+  const message = sentMessage("m1", blocks, (mime, bytes) => {
+    if (failFirst && !failed) {
+      failed = true;
+      throw new Error("fixture publication failed");
+    }
+    const id = digest(bytes);
+    blobs.push({ mime, bytes, id });
+    return id;
+  });
+  if (!message?.resolve) throw new Error("Expected pending image decode");
+  for (const child of message.view.c) views.set(child.id, child.p);
+  await message.resolve((...ops) => {
+    for (const [verb, id, , , child] of ops) if (verb === "add") views.set(String(id), record(record(child).p));
+  }, () => true);
+  return { blobs, views: blocks.map((_, index) => views.get(`m1.image${index + 1}`)) };
+}
+
+test("#32 publishes a 4097px image at the viewer limit", async () => {
+  const { blobs } = await resolveImages([block(widePng(4097).toString("base64"))]);
+  expect(blobs.map(blob => blob.mime)).toEqual(["image/webp"]);
+  const dimensions = await Promise.all(blobs.map(blob => new Bun.Image(blob.bytes).metadata()));
+  expect(dimensions.map(({ width, height }) => [width, height])).toEqual([[4096, 900]]);
+});
+
+test("#32 discloses the resize in the native viewer alt label", async () => {
+  const { views } = await resolveImages([block(widePng(4097).toString("base64"))]);
+  expect(views.map(view => view?.alt)).toEqual([expect.stringMatching(/^Image 1.*resized/i)]);
+});
+
+test("#32 passes a padded 4096px source to the viewer byte for byte", async () => {
+  const exact = widePng(4096, attachmentLimit);
+  const { blobs, views } = await resolveImages([block(exact.toString("base64"))]);
+  expect(blobs.map(({ mime, id }) => [mime, id])).toEqual([["image/png", digest(exact)]]);
+  expect(views.map(view => view?.alt)).toEqual(["Image 1"]);
+});
+
+test.each([
+  ["a MIME mismatch", "image/jpeg", false, ["Image 1 unavailable", "Image 2"]],
+  ["a successfully published source", "image/png", false, ["Image 1", "Image 2 unavailable"]],
+  ["a failed publication", "image/png", true, ["Image 1 unavailable", "Image 2"]],
+] as const)("#32 charges padded original bytes only for %s when it publishes", async (_case, mime, failFirst, expected) => {
+  const first = widePng(4097, 2_400_000).toString("base64");
+  const second = widePng(4097, 2_400_000, "inverted").toString("base64");
+  const { blobs, views } = await resolveImages([block(first, mime), block(second)], failFirst);
+  expect(views.map(view => String(view?.text ?? view?.alt).replace(/ \(resized\)$/i, ""))).toEqual([...expected]);
+  expect(blobs.map(blob => blob.mime)).toEqual(["image/webp"]);
+});
+
+test.each([
+  ["retries at full viewer resolution", 1_800_000, 4096],
+  ["falls back to a smaller rendition", 1_000_000, 2048],
+] as const)("#32 %s when the best rendition exceeds the published budget", async (_case, remaining, width) => {
+  const jpeg = await new Bun.Image(widePng(4097, undefined, "noise")).jpeg({ quality: 1 }).bytes();
+  const noisy = block(Buffer.from(jpeg).toString("base64"), "image/jpeg");
+  const ordinary = widePng(128, 900_000);
+  const first = widePng(128, attachmentLimit - remaining);
+  const later = block(blue);
+  // This compliant neighbor fits the source budget but not the published
+  // budget after the full-resolution rendition. A tiny neighbor still fits.
+  const neighbors = width === 4096 ? [block(ordinary.toString("base64")), later] : [later];
+  const { blobs, views } = await resolveImages([block(first.toString("base64")), noisy, ...neighbors]);
+  expect(blobs.map(blob => blob.mime)).toEqual(["image/png", "image/webp", "image/png"]);
+  const rendition = blobs.find(blob => blob.mime === "image/webp");
+  if (!rendition) throw new Error("Expected a viewer rendition");
+  expect((await new Bun.Image(rendition.bytes).metadata()).width).toBe(width);
+  expect(blobs.reduce((total, blob) => total + blob.bytes.length, 0)).toBeLessThanOrEqual(attachmentLimit);
+  if (width === 4096) expect(views[2]?.text).toBe("Image 3 unavailable");
+  expect(views.at(-1)?.blob).toBe(blobIds[1]);
+});
 
 test("#32 displays two real clipboard images in send order after OmO acknowledges the prompt", async () => {
   let pasted = 0, submitted = false;
