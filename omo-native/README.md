@@ -17,6 +17,52 @@ tern plugin list
 
 Look for `omo-native` in the list.
 
+### Mobile setup (Android and iOS)
+
+Install OMO Native in two places if you want to use its commands from the
+mobile Tern palette:
+
+- **On the connected computer:** follow [Setup](#setup) above. The computer
+  runs the chat and needs Bun, OmO, and the `omo-native` launcher available to
+  the Tern host. You do not need to install Bun or OmO on the phone.
+- **In the mobile Tern app:** install the plugin folder so that the mobile
+  window registers its own palette commands. Installing it on the computer
+  alone does not add those commands to the phone.
+
+1. Copy the entire `omo-native` package folder from the computer's Tern plugins
+   folder (`tern plugin dir`). If the computer uses a linked plugin, copy the
+   folder the link points to. Copy the package folder itself, not the `.path`
+   file, the whole repository, or a ZIP file. The destination should contain
+   `Documents/Plugins/omo-native/plugin.toml` inside Tern's app storage.
+2. Put the package in the mobile app's plugin folder:
+   - **Android:** in Tern, open **Settings → Plugins → Open plugins folder**.
+     If your build makes that folder writable through a file manager, copy
+     `omo-native` into it. Use Tern's own folder, not the phone's shared
+     `Documents` directory. On Tern 0.9.33, the copy was verified using debug
+     ADB on a disposable Android 15 emulator; a file-manager install on a
+     regular phone has not been verified. If Tern does not expose the folder,
+     this guide has no verified installation method for that device.
+   - **iPhone or iPad:** in Files, go to **On My iPhone** or **On My iPad →
+     Tern → Plugins** and copy `omo-native` there. This is the documented
+     [Tern iOS installation path](https://docs.stencil.so/tern/guides/distribution.html#ios);
+     this plugin has not been verified on an iOS TestFlight build.
+3. In the mobile app's **Plugins** settings, enable **Load plugins**, enable
+   **OMO Native**, and tap **Reload**. Check that the mobile copy says
+   **Ready**. Then search for `OMO` in the palette's **All** scope. If none of
+   the OMO commands appear, check the mobile copy's load status first.
+4. Connect the mobile app to the computer running OmO. If the palette
+   commands appear but cannot launch a chat, check that `command -v omo-native`
+   resolves in a terminal on that host. In an already open OMO Native chat,
+   `/new` and `/resume` are separate from the palette: the chat handles those
+   commands on the connected computer.
+
+On the Android 15 emulator, Tern 0.9.33 with OMO Native 0.2.0 showed
+**OMO: New Session**, **OMO: Resume Session**, and **OMO: Toggle Workflow**
+with the mobile plugin enabled. Turning it off removed all three. In a
+host-connected chat, `/new` and `/resume` worked; launching those actions from
+the paired palette and restoring a transcript containing messages were not
+verified.
+
 ### Update OMO Native
 
 If OMO Native is already installed from GitHub, run:
@@ -127,7 +173,9 @@ When OmO reports current subscription quota for the account this session uses, a
 
 From a terminal or agent pane in the original project, choose **OMO: Resume Session** in the palette. It opens the picker in a separate tab. No OmO session starts while you browse. The picker lists saved local sessions whose recorded working directory resolves to this project, newest first. Worker sessions and files without any saved entries are excluded.
 
-On mobile, use the same **OMO: New Session** and **OMO: Resume Session** palette commands with the plugin available to the client and installed on the connected Tern host. To switch within an existing chat, use `/resume`; cancelling leaves the existing chat and draft unchanged.
+On mobile, see [Mobile setup](#mobile-setup-android-and-ios) for palette
+installation. To switch within an existing chat, use `/resume`; cancelling
+leaves the existing chat and draft unchanged.
 
 Type to filter by title, filename, or displayed date. Use the same row controls as the model picker, then press **Enter** or click **Resume**. The plugin rechecks the file and working directory before opening the transcript. If the file is gone, click **Reload** to refresh the list. **Escape** or **Cancel** exits this launcher without opening a session.
 
